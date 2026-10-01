@@ -147,7 +147,7 @@ async function proposeCatalogEntries(typeDef, sections, llm) {
     var sources = verifyCitations(e.citations || [], sections);
     var verified = sources.some(function (s) { return s.verified; });
     return {
-      name: e.name, tag: e.tag || '', checklist: e.checklist || '', category: e.category, whenToUse: e.whenToUse || '',
+      name: shortProcessName(e.name), sourceTitle: e.sourceTitle || e.name, tag: e.tag || '', checklist: e.checklist || '', category: e.category, whenToUse: e.whenToUse || '',
       sources: sources,
       flags: verified ? [] : [makeFlag('UNVERIFIED_SOURCE', 'No cited quote was found in the sources.', true)]
     };

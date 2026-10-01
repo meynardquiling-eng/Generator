@@ -115,8 +115,10 @@ var TRIAGE_TYPE = {
   catalogPromptGuidance: function () {
     return [
       'Extract the list of documented ticket-handling processes relevant to these categories: ' + TRIAGE_CATEGORIES.join(', ') + '.',
-      'For each process give its exact name as written in the source, the exact tag to apply (empty string if the source does not name one), ',
-      'the exact interactive checklist/process to launch (empty string if not documented), the best-fitting category, and when to use it.',
+      'For each process give: name = a short label of 2 to 5 key words taken from the source heading, dropping filler such as "Process guide", "How to", "if C wants" ',
+      '(example: "Process Guide if C wants a Groupon Voucher refunded" becomes "Groupon voucher refund"); sourceTitle = the heading exactly as written in the source; ',
+      'the exact tag to apply (empty string if the source does not name one); the exact interactive checklist/process to launch (empty string if not documented); ',
+      'the best-fitting category; and when to use it in one short line.',
       'Do not invent processes, tags or checklists. Every entry needs at least one verbatim quote from the sources.'
     ].join('');
   },
@@ -130,7 +132,7 @@ var TRIAGE_TYPE = {
           items: {
             type: 'object', additionalProperties: false,
             properties: {
-              name: { type: 'string' }, tag: { type: 'string' }, checklist: { type: 'string' },
+              name: { type: 'string' }, sourceTitle: { type: 'string' }, tag: { type: 'string' }, checklist: { type: 'string' },
               category: { type: 'string', enum: TRIAGE_CATEGORIES }, whenToUse: { type: 'string' },
               citations: {
                 type: 'array',
@@ -141,7 +143,7 @@ var TRIAGE_TYPE = {
                 }
               }
             },
-            required: ['name', 'tag', 'checklist', 'category', 'whenToUse', 'citations']
+            required: ['name', 'sourceTitle', 'tag', 'checklist', 'category', 'whenToUse', 'citations']
           }
         }
       },
@@ -149,3 +151,27 @@ var TRIAGE_TYPE = {
     };
   }
 };
+
+// Short trainee-facing process label from a Knowledge Library heading, used when the
+// generator returns a long name: "Process Guide if C wants a Groupon Voucher refunded"
+// -> "Groupon Voucher refund".
+var PROCESS_FILLER = [
+  /^\s*(?:\p{Extended_Pictographic}|[^\w\s])+\s*/u,
+  /^(?:the\s+)?(?:process\s+guide|guide|process|sop|workflow|how\s+to\s+handle|how\s+to)\s*(?:for|on|if|when|to|:|-|\u2013|\u2014)?\s*/i,
+  /^(?:if|when)\s+/i,
+  /^(?:the\s+)?(?:c|cx|customer|member)\s+(?:wants|asks|requests|is\s+asking)\s+(?:for\s+|to\s+(?:have\s+|get\s+)?)?(?:a|an|the|their|his|her)?\s*/i
+];
+
+var PROCESS_NAME_VERSION = 2;
+
+function shortProcessName(name) {
+  var s = String(name || '').trim();
+  for (var pass = 0; pass < 3; pass++) {
+    PROCESS_FILLER.forEach(function (re) { s = s.replace(re, ''); });
+  }
+  s = s.replace(/\s+(?:process|guide|procedure)$/i, '').replace(/\brefunded\b/i, 'refund').replace(/\s+/g, ' ').trim();
+  var words = s.split(' ');
+  if (words.length > 6) s = words.slice(0, 6).join(' ');
+  if (!s) return String(name || '').trim();
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}

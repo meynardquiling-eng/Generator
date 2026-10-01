@@ -155,11 +155,11 @@ class FakeLlm {
     if (schema.properties.entries) {
       return {
         entries: [
-          { name: 'Lockout Refund', tag: 'lockout_refund', checklist: 'Lockout Checklist', category: 'Lock-out refund', whenToUse: 'Cleaner could not get in.',
+          { name: 'Lockout Refund', sourceTitle: 'Lock-out refund', tag: 'lockout_refund', checklist: 'Lockout Checklist', category: 'Lock-out refund', whenToUse: 'Cleaner could not get in.',
             citations: [{ sectionId: 'KL-tri-1', quote: 'use the Lockout Refund process, tag lockout_refund', supports: 'process' }] },
-          { name: 'Unused Voucher', tag: 'unused_voucher', checklist: 'Voucher Checklist', category: 'Unused-voucher issue', whenToUse: 'Voucher never redeemed.',
+          { name: 'Unused Voucher', sourceTitle: 'Unused voucher', tag: 'unused_voucher', checklist: 'Voucher Checklist', category: 'Unused-voucher issue', whenToUse: 'Voucher never redeemed.',
             citations: [{ sectionId: 'KL-tri-2', quote: 'use the Unused Voucher process, tag unused_voucher', supports: 'process' }] },
-          { name: 'Invented Process', tag: 'x', checklist: 'y', category: 'General retention', whenToUse: 'n/a',
+          { name: 'Invented Process', sourceTitle: 'Invented', tag: 'x', checklist: 'y', category: 'General retention', whenToUse: 'n/a',
             citations: [{ sectionId: 'KL-tri-2', quote: 'this sentence is not in any source at all', supports: 'none' }] }
         ]
       };

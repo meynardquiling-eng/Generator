@@ -176,3 +176,10 @@ test('slack threads join the question with the replies, without emails or record
   assert.match(t, /C \[id\]/);
   assert.match(sections[0].heading, /2 replies/);
 });
+
+test('process names become short keyword labels', () => {
+  assert.equal(core.shortProcessName('Process Guide if C wants a Groupon Voucher refunded'), 'Groupon Voucher refund');
+  assert.equal(core.shortProcessName('🎫 Unused DHJ Voucher'), 'Unused DHJ Voucher');
+  assert.equal(core.shortProcessName('How to handle lock-out refunds'), 'Lock-out refunds');
+  assert.equal(core.shortProcessName('Lockout Refund'), 'Lockout Refund');
+});

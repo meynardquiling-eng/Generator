@@ -968,8 +968,10 @@ var TRIAGE_TYPE = {
   catalogPromptGuidance: function () {
     return [
       'Extract the list of documented ticket-handling processes relevant to these categories: ' + TRIAGE_CATEGORIES.join(', ') + '.',
-      'For each process give its exact name as written in the source, the exact tag to apply (empty string if the source does not name one), ',
-      'the exact interactive checklist/process to launch (empty string if not documented), the best-fitting category, and when to use it.',
+      'For each process give: name = a short label of 2 to 5 key words taken from the source heading, dropping filler such as "Process guide", "How to", "if C wants" ',
+      '(example: "Process Guide if C wants a Groupon Voucher refunded" becomes "Groupon voucher refund"); sourceTitle = the heading exactly as written in the source; ',
+      'the exact tag to apply (empty string if the source does not name one); the exact interactive checklist/process to launch (empty string if not documented); ',
+      'the best-fitting category; and when to use it in one short line.',
       'Do not invent processes, tags or checklists. Every entry needs at least one verbatim quote from the sources.'
     ].join('');
   },
@@ -983,7 +985,7 @@ var TRIAGE_TYPE = {
           items: {
             type: 'object', additionalProperties: false,
             properties: {
-              name: { type: 'string' }, tag: { type: 'string' }, checklist: { type: 'string' },
+              name: { type: 'string' }, sourceTitle: { type: 'string' }, tag: { type: 'string' }, checklist: { type: 'string' },
               category: { type: 'string', enum: TRIAGE_CATEGORIES }, whenToUse: { type: 'string' },
               citations: {
                 type: 'array',
@@ -994,7 +996,7 @@ var TRIAGE_TYPE = {
                 }
               }
             },
-            required: ['name', 'tag', 'checklist', 'category', 'whenToUse', 'citations']
+            required: ['name', 'sourceTitle', 'tag', 'checklist', 'category', 'whenToUse', 'citations']
           }
         }
       },
@@ -1002,6 +1004,30 @@ var TRIAGE_TYPE = {
     };
   }
 };
+
+// Short trainee-facing process label from a Knowledge Library heading, used when the
+// generator returns a long name: "Process Guide if C wants a Groupon Voucher refunded"
+// -> "Groupon Voucher refund".
+var PROCESS_FILLER = [
+  /^\s*(?:\p{Extended_Pictographic}|[^\w\s])+\s*/u,
+  /^(?:the\s+)?(?:process\s+guide|guide|process|sop|workflow|how\s+to\s+handle|how\s+to)\s*(?:for|on|if|when|to|:|-|\u2013|\u2014)?\s*/i,
+  /^(?:if|when)\s+/i,
+  /^(?:the\s+)?(?:c|cx|customer|member)\s+(?:wants|asks|requests|is\s+asking)\s+(?:for\s+|to\s+(?:have\s+|get\s+)?)?(?:a|an|the|their|his|her)?\s*/i
+];
+
+var PROCESS_NAME_VERSION = 2;
+
+function shortProcessName(name) {
+  var s = String(name || '').trim();
+  for (var pass = 0; pass < 3; pass++) {
+    PROCESS_FILLER.forEach(function (re) { s = s.replace(re, ''); });
+  }
+  s = s.replace(/\s+(?:process|guide|procedure)$/i, '').replace(/\brefunded\b/i, 'refund').replace(/\s+/g, ' ').trim();
+  var words = s.split(' ');
+  if (words.length > 6) s = words.slice(0, 6).join(' ');
+  if (!s) return String(name || '').trim();
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
 
 // ---- src/drills/registry.js
 // Drill type registry. To add a drill, write a type definition with the same shape as
@@ -1190,7 +1216,7 @@ async function proposeCatalogEntries(typeDef, sections, llm) {
     var sources = verifyCitations(e.citations || [], sections);
     var verified = sources.some(function (s) { return s.verified; });
     return {
-      name: e.name, tag: e.tag || '', checklist: e.checklist || '', category: e.category, whenToUse: e.whenToUse || '',
+      name: shortProcessName(e.name), sourceTitle: e.sourceTitle || e.name, tag: e.tag || '', checklist: e.checklist || '', category: e.category, whenToUse: e.whenToUse || '',
       sources: sources,
       flags: verified ? [] : [makeFlag('UNVERIFIED_SOURCE', 'No cited quote was found in the sources.', true)]
     };
@@ -2592,7 +2618,9 @@ function createDrillService(deps) {
   // is really in the sources are used automatically; unbacked ones are dropped.
   async function ensureCatalog() {
     var approved = await approvedCatalog();
-    if (approved.length >= 2) return approved;
+    // Entries saved before short process names were introduced are rebuilt once.
+    var current = approved.filter(function (e) { return e.nameVersion === PROCESS_NAME_VERSION; });
+    if (current.length >= 2 && current.length === approved.length) return approved;
     await proposeCatalog();
     approved = await approvedCatalog();
     if (approved.length < 2) {
@@ -2605,17 +2633,30 @@ function createDrillService(deps) {
     var sections = selectSections(await getAllSections(), TRIAGE_TYPE.sourceKeywords, SOURCE_PROMPT_CHARS);
     var entries = await proposeCatalogEntries(TRIAGE_TYPE, sections, llm);
     var saved = [];
+    var keepIds = {};
     for (var i = 0; i < entries.length; i++) {
       var e = entries[i];
       var id = 'PROC-' + hashString(normalizeText(e.name)).slice(0, 6).toUpperCase();
-      var existing = await store.get(COLLECTIONS.catalog, id);
-      if (existing && existing.status === 'APPROVED') continue;
+      if (keepIds[id]) continue;
+      keepIds[id] = true;
       var verified = (e.sources || []).some(function (x) { return x.verified; });
       var doc = Object.assign({ catalogId: id, proposedAt: now(), proposedBy: actor }, e, {
-        status: verified ? 'APPROVED' : 'REJECTED', approvedBy: verified ? 'auto (verified quote)' : null
+        status: verified ? 'APPROVED' : 'REJECTED', approvedBy: verified ? 'auto (verified quote)' : null,
+        nameVersion: PROCESS_NAME_VERSION
       });
       await store.put(COLLECTIONS.catalog, id, doc);
       saved.push(doc);
+    }
+    // A rebuild replaces the catalog: entries the new pass did not return stop being choices.
+    if (saved.some(function (d) { return d.status === 'APPROVED'; })) {
+      var all = await store.list(COLLECTIONS.catalog);
+      for (var j = 0; j < all.length; j++) {
+        if (!keepIds[all[j].catalogId] && all[j].status === 'APPROVED') {
+          all[j].status = 'REPLACED';
+          all[j].replacedAt = now();
+          await store.put(COLLECTIONS.catalog, all[j].catalogId, all[j]);
+        }
+      }
     }
     return saved;
   }
@@ -3653,7 +3694,7 @@ function viewCatalog() {
     entries.length ? h('div', { class: 'table-wrap' }, h('table', null,
       h('thead', null, h('tr', null, h('th', null, 'Process'), h('th', null, 'Tag'), h('th', null, 'Checklist'))),
       h('tbody', null, entries.map(function (e) {
-        return h('tr', null, h('td', null, e.name), h('td', null, e.tag || h('span', { class: 'muted' }, '\u2014')), h('td', null, e.checklist || h('span', { class: 'muted' }, '\u2014')));
+        return h('tr', null, h('td', null, e.name, e.sourceTitle && e.sourceTitle !== e.name ? h('div', { class: 'small muted' }, 'Library: ' + e.sourceTitle) : null), h('td', null, e.tag || h('span', { class: 'muted' }, '\u2014')), h('td', null, e.checklist || h('span', { class: 'muted' }, '\u2014')));
       })))) : h('p', { class: 'muted small' }, 'Built the first time you create a Triage drill.'));
 }
 

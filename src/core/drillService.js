@@ -884,7 +884,9 @@ function createDrillService(deps) {
   // is really in the sources are used automatically; unbacked ones are dropped.
   async function ensureCatalog() {
     var approved = await approvedCatalog();
-    if (approved.length >= 2) return approved;
+    // Entries saved before short process names were introduced are rebuilt once.
+    var current = approved.filter(function (e) { return e.nameVersion === PROCESS_NAME_VERSION; });
+    if (current.length >= 2 && current.length === approved.length) return approved;
     await proposeCatalog();
     approved = await approvedCatalog();
     if (approved.length < 2) {
@@ -897,17 +899,30 @@ function createDrillService(deps) {
     var sections = selectSections(await getAllSections(), TRIAGE_TYPE.sourceKeywords, SOURCE_PROMPT_CHARS);
     var entries = await proposeCatalogEntries(TRIAGE_TYPE, sections, llm);
     var saved = [];
+    var keepIds = {};
     for (var i = 0; i < entries.length; i++) {
       var e = entries[i];
       var id = 'PROC-' + hashString(normalizeText(e.name)).slice(0, 6).toUpperCase();
-      var existing = await store.get(COLLECTIONS.catalog, id);
-      if (existing && existing.status === 'APPROVED') continue;
+      if (keepIds[id]) continue;
+      keepIds[id] = true;
       var verified = (e.sources || []).some(function (x) { return x.verified; });
       var doc = Object.assign({ catalogId: id, proposedAt: now(), proposedBy: actor }, e, {
-        status: verified ? 'APPROVED' : 'REJECTED', approvedBy: verified ? 'auto (verified quote)' : null
+        status: verified ? 'APPROVED' : 'REJECTED', approvedBy: verified ? 'auto (verified quote)' : null,
+        nameVersion: PROCESS_NAME_VERSION
       });
       await store.put(COLLECTIONS.catalog, id, doc);
       saved.push(doc);
+    }
+    // A rebuild replaces the catalog: entries the new pass did not return stop being choices.
+    if (saved.some(function (d) { return d.status === 'APPROVED'; })) {
+      var all = await store.list(COLLECTIONS.catalog);
+      for (var j = 0; j < all.length; j++) {
+        if (!keepIds[all[j].catalogId] && all[j].status === 'APPROVED') {
+          all[j].status = 'REPLACED';
+          all[j].replacedAt = now();
+          await store.put(COLLECTIONS.catalog, all[j].catalogId, all[j]);
+        }
+      }
     }
     return saved;
   }

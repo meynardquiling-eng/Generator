@@ -774,7 +774,7 @@ function viewCatalog() {
     entries.length ? h('div', { class: 'table-wrap' }, h('table', null,
       h('thead', null, h('tr', null, h('th', null, 'Process'), h('th', null, 'Tag'), h('th', null, 'Checklist'))),
       h('tbody', null, entries.map(function (e) {
-        return h('tr', null, h('td', null, e.name), h('td', null, e.tag || h('span', { class: 'muted' }, '\u2014')), h('td', null, e.checklist || h('span', { class: 'muted' }, '\u2014')));
+        return h('tr', null, h('td', null, e.name, e.sourceTitle && e.sourceTitle !== e.name ? h('div', { class: 'small muted' }, 'Library: ' + e.sourceTitle) : null), h('td', null, e.tag || h('span', { class: 'muted' }, '\u2014')), h('td', null, e.checklist || h('span', { class: 'muted' }, '\u2014')));
       })))) : h('p', { class: 'muted small' }, 'Built the first time you create a Triage drill.'));
 }
 

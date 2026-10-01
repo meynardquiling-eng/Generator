@@ -369,7 +369,7 @@ test('triage drill builds its process catalog automatically from verified quotes
   assert.equal(d.config.targetMinutes, 30);
   const s = await env.svc.generateNextScenario(d.drillId);
   const catalog = await env.svc.listCatalog();
-  assert.equal(catalog.find(e => e.name === 'Invented Process').status, 'REJECTED', 'entry without a verified quote is dropped');
+  assert.equal(catalog.find(e => e.sourceTitle === 'Invented').status, 'REJECTED', 'entry without a verified quote is dropped');
   assert.equal(s.scenarioId, 'TR-001');
   const proc = s.trainee.questions.find(q => q.key === 'process');
   assert.deepEqual(plain(proc.choices.slice().sort()), ['Lockout Refund', 'Unused Voucher']);
@@ -520,4 +520,19 @@ test('deleting a drill removes it, its scenarios and its responses only', async 
   await assert.rejects(env.svc.getDrillBundle(drillId), /not found/);
   const next = await env.svc.createDrill({ drillType: 'APPROVE_DENY' });
   assert.notEqual(next.drillId, drillId, 'a deleted drill ID is never reused');
+});
+
+test('old long-named catalog entries are rebuilt once and replaced', async () => {
+  const env = await setup();
+  await env.store.put('catalog', 'PROC-OLD1', { catalogId: 'PROC-OLD1', name: 'Process Guide if C wants a Groupon Voucher refunded', status: 'APPROVED', tag: '', checklist: '' });
+  await env.store.put('catalog', 'PROC-OLD2', { catalogId: 'PROC-OLD2', name: 'Process Guide for Lock-out refund requests', status: 'APPROVED', tag: '', checklist: '' });
+  const d = await env.svc.createDrill({ drillType: 'TRIAGE', scenarioCount: 1 });
+  const s = await env.svc.generateNextScenario(d.drillId);
+  const choices = s.trainee.questions.find(q => q.key === 'process').choices;
+  assert.deepEqual(plain(choices.slice().sort()), ['Lockout Refund', 'Unused Voucher']);
+  const cat = await env.svc.listCatalog();
+  assert.equal(cat.find(e => e.catalogId === 'PROC-OLD1').status, 'REPLACED');
+  const calls = env.llm.calls;
+  await env.svc.generateNextScenario(d.drillId);
+  assert.equal(env.llm.calls, calls + 1, 'catalog is not rebuilt again');
 });

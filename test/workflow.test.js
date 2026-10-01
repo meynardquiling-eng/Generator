@@ -587,3 +587,13 @@ test('the generator may change the suggested category to fit its ticket', async 
   const p = env.llm.prompts.find(x => /Aim for this category/.test(x));
   assert.match(p, /Aim for this category: CP lockout\. Then set "category" to whichever category/);
 });
+
+test('reference material such as code lists and penalty ladders never becomes a triage process', async () => {
+  const env = await setup();
+  const d = await env.svc.createDrill({ drillType: 'TRIAGE', audience: 'CP', scenarioCount: 1 });
+  const s = await env.svc.generateNextScenario(d.drillId);
+  const names = (await env.svc.listCatalog()).map(e => e.name);
+  assert.ok(!names.some(n => /ladder|reason codes/i.test(n)), names.join(', '));
+  const proc = s.trainee.questions.find(q => q.key === 'process');
+  assert.deepEqual(plain(proc.choices.slice().sort()), ['CP Lockout Pay', 'Missing Payout']);
+});

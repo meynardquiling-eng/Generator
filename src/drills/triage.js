@@ -142,7 +142,10 @@ var TRIAGE_TYPE = {
       'For each process give: name = a short label of 2 to 5 key words taken from the source heading, dropping filler such as "Process guide", "How to", "if C wants" ',
       '(example: "Process Guide if C wants a Groupon Voucher refunded" becomes "Groupon voucher refund"); sourceTitle = the heading exactly as written in the source; ',
       'the exact tag to apply (empty string if the source does not name one); the exact interactive checklist/process to launch (empty string if not documented); ',
-      'the best-fitting category; and when to use it in one short line.',
+      'the best-fitting category; when to use it in one short line; and kind.',
+      'kind = "PROCESS" only when the source gives steps an agent follows to handle a ticket. ',
+      'Reference material is NOT a process: code lists, reason codes, penalty ladders, strike or warning tiers, rate or fee tables, matrices, glossaries, definitions, overviews and FAQs. ',
+      'Mark those kind = "REFERENCE" (they are not answer choices). ',
       'Do not invent processes, tags or checklists. Every entry needs at least one verbatim quote from the sources.'
     ].join('');
   },
@@ -158,6 +161,7 @@ var TRIAGE_TYPE = {
             properties: {
               name: { type: 'string' }, sourceTitle: { type: 'string' }, tag: { type: 'string' }, checklist: { type: 'string' },
               category: { type: 'string', enum: triageCategories(audienceId) }, whenToUse: { type: 'string' },
+              kind: { type: 'string', enum: ['PROCESS', 'REFERENCE'] },
               citations: {
                 type: 'array',
                 items: {
@@ -167,7 +171,7 @@ var TRIAGE_TYPE = {
                 }
               }
             },
-            required: ['name', 'sourceTitle', 'tag', 'checklist', 'category', 'whenToUse', 'citations']
+            required: ['name', 'sourceTitle', 'tag', 'checklist', 'category', 'whenToUse', 'kind', 'citations']
           }
         }
       },
@@ -186,7 +190,15 @@ var PROCESS_FILLER = [
   /^(?:the\s+)?(?:c|cx|customer|member)\s+(?:wants|asks|requests|is\s+asking)\s+(?:for\s+|to\s+(?:have\s+|get\s+)?)?(?:a|an|the|their|his|her)?\s*/i
 ];
 
-var PROCESS_NAME_VERSION = 2;
+var PROCESS_NAME_VERSION = 3;
+
+// Knowledge Library headings that are lookup material, not a process an agent runs.
+var REFERENCE_TITLE_RE = /\b(reason\s+codes?|codes?\s+(?:list|table)|ladders?|matrix|matrices|tables?|glossary|definitions?|overview|faqs?|cheat\s*sheet|list\s+of|rate\s+card)\b/i;
+
+function isReferenceEntry(e) {
+  if (e.kind === 'REFERENCE') return true;
+  return REFERENCE_TITLE_RE.test(String(e.name || '')) || REFERENCE_TITLE_RE.test(String(e.sourceTitle || ''));
+}
 
 function shortProcessName(name) {
   var s = String(name || '').trim();

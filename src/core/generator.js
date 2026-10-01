@@ -154,7 +154,7 @@ async function proposeCatalogEntries(typeDef, sections, llm, audienceId) {
   });
   var problems = checkJsonAgainstSchema(out, schema);
   if (problems.length) throw ServiceError('BAD_MODEL_OUTPUT', 'Catalog output did not match the expected structure: ' + problems.slice(0, 5).join('; '));
-  return (out.entries || []).map(function (e) {
+  return (out.entries || []).filter(function (e) { return !isReferenceEntry(e); }).map(function (e) {
     var sources = verifyCitations(e.citations || [], sections);
     var verified = sources.some(function (s) { return s.verified; });
     return {

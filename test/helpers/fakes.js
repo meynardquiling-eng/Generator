@@ -160,19 +160,23 @@ class FakeLlm {
       const cats = schema.properties.entries.items.properties.category.enum;
       if (cats[0] === 'CP lockout') {
         return { entries: [
-          { name: 'CP Lockout Pay', sourceTitle: 'CP lockout', tag: 'cp_lockout', checklist: 'CP Lockout Checklist', category: 'CP lockout', whenToUse: 'CP could not enter.',
+          { name: 'CP Lockout Pay', sourceTitle: 'CP lockout', tag: 'cp_lockout', checklist: 'CP Lockout Checklist', category: 'CP lockout', whenToUse: 'CP could not enter.', kind: 'PROCESS',
             citations: [{ sectionId: 'KL-cp-1', quote: 'use the CP Lockout Pay process', supports: 'process' }] },
-          { name: 'Missing Payout', sourceTitle: 'Missing payout', tag: 'payout_missing', checklist: 'Payout Checklist', category: 'Payout issue', whenToUse: 'Payout not received.',
+          { name: 'Missing Payout', sourceTitle: 'Missing payout', tag: 'payout_missing', checklist: 'Payout Checklist', category: 'Payout issue', whenToUse: 'Payout not received.', kind: 'PROCESS',
+            citations: [{ sectionId: 'KL-cp-2', quote: 'use the Missing Payout process', supports: 'process' }] },
+          { name: 'False invoice penalty ladder', sourceTitle: 'False invoice penalty ladder', tag: '', checklist: '', category: 'Payout issue', whenToUse: 'n/a', kind: 'PROCESS',
+            citations: [{ sectionId: 'KL-cp-2', quote: 'use the Missing Payout process', supports: 'process' }] },
+          { name: 'CP-facing deactivation reason codes', sourceTitle: 'CP-facing deactivation reason codes', tag: '', checklist: '', category: 'Payout issue', whenToUse: 'n/a', kind: 'REFERENCE',
             citations: [{ sectionId: 'KL-cp-2', quote: 'use the Missing Payout process', supports: 'process' }] }
         ] };
       }
       return {
         entries: [
-          { name: 'Lockout Refund', sourceTitle: 'Lock-out refund', tag: 'lockout_refund', checklist: 'Lockout Checklist', category: 'Lock-out refund', whenToUse: 'Cleaner could not get in.',
+          { name: 'Lockout Refund', sourceTitle: 'Lock-out refund', tag: 'lockout_refund', checklist: 'Lockout Checklist', category: 'Lock-out refund', whenToUse: 'Cleaner could not get in.', kind: 'PROCESS',
             citations: [{ sectionId: 'KL-tri-1', quote: 'use the Lockout Refund process, tag lockout_refund', supports: 'process' }] },
-          { name: 'Unused Voucher', sourceTitle: 'Unused voucher', tag: 'unused_voucher', checklist: 'Voucher Checklist', category: 'Unused-voucher issue', whenToUse: 'Voucher never redeemed.',
+          { name: 'Unused Voucher', sourceTitle: 'Unused voucher', tag: 'unused_voucher', checklist: 'Voucher Checklist', category: 'Unused-voucher issue', whenToUse: 'Voucher never redeemed.', kind: 'PROCESS',
             citations: [{ sectionId: 'KL-tri-2', quote: 'use the Unused Voucher process, tag unused_voucher', supports: 'process' }] },
-          { name: 'Invented Process', sourceTitle: 'Invented', tag: 'x', checklist: 'y', category: 'General retention', whenToUse: 'n/a',
+          { name: 'Invented Process', sourceTitle: 'Invented', tag: 'x', checklist: 'y', category: 'General retention', whenToUse: 'n/a', kind: 'PROCESS',
             citations: [{ sectionId: 'KL-tri-2', quote: 'this sentence is not in any source at all', supports: 'none' }] }
         ]
       };

@@ -114,9 +114,16 @@ class FakeBridge {
   }
   async getFormResult(folderId, drillId) { const f = this.files[`drillform-result__${drillId}.json`]; return f ? clone(f.content) : null; }
   async getResponses(folderId, drillId) { const f = this.files[`drillform-responses__${drillId}.json`]; return f ? clone(f.content) : null; }
-  async requestSourceExport() { this.sourceRequested = true; return { requested: true }; }
+  async requestSourceExport(folderId, docId, key) {
+    this.sourceRequests = this.sourceRequests || {};
+    const reused = !!this.sourceRequests[key];
+    this.sourceRequests[key] = true;
+    return { requested: true, reused };
+  }
   async getSourceExport() { return this.sourceExport ? clone(this.sourceExport) : null; }
   async getBridgeStatus() { return this.status ? clone(this.status) : null; }
+  async getSourceIndex() { return this.sourceExport ? { generatedAt: this.sourceExport.generatedAt } : null; }
+  async getDocModifiedTime() { return this.docModified || null; }
 }
 
 // TEST FIXTURE sections (invented wording, used only to exercise grounding).
@@ -141,6 +148,7 @@ class FakeLlm {
   queue(fn) { this.overrides.push(fn); }
   async generateJson({ user, schema }) {
     this.calls++;
+    this.prompts = (this.prompts || []).concat([user]);
     const ids = [...user.matchAll(/<source id="([^"]+)"[^\n]*\n([\s\S]*?)\n<\/source>/g)].map(m => ({ id: m[1], text: m[2] }));
     const first = ids[0];
     const quote = first ? first.text.slice(10, 70) : 'nothing';
@@ -165,7 +173,8 @@ class FakeLlm {
       rationale: 'Trainer-only rationale for scenario ' + n + ': the member qualifies based on the cleaning count.',
       commonMistakes: ['Offering an ETF waiver without a documented no-show (case ' + n + ').'],
       coachingNotes: 'Coach on reading the cleaning count first (case ' + n + ').',
-      citations: [{ sectionId: first ? first.id : 'none', quote, supports: 'decision' }]
+      citations: [{ sectionId: first ? first.id : 'none', quote, supports: 'decision' }],
+      sourceConflict: ''
     };
     let out;
     if (schema.properties.correctActions) {

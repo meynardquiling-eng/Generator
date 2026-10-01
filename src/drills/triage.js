@@ -23,9 +23,8 @@ var TRIAGE_TYPE = {
   ],
 
   formInstructions: function (drill) {
-    return 'Triage-Only drill. Target time: ' + drill.config.targetMinutes + ' minutes.\n\n' +
-      'You will NOT write a customer response. For each ticket, choose the process that should be used, ' +
-      'the tag to apply, and the interactive checklist/process to launch.';
+    return 'Triage \u2014 about ' + drill.config.targetMinutes + ' minutes. Do not write a reply.\n' +
+      'For each ticket: pick the process, the tag and the checklist to launch.';
   },
 
   // ctx.catalog: approved catalog entries.
@@ -36,26 +35,26 @@ var TRIAGE_TYPE = {
     var checklists = uniq(catalog.map(function (c) { return c.checklist; }).filter(Boolean));
     var qs = [{
       key: 'process', type: 'MULTIPLE_CHOICE', required: true,
-      prompt: 'Which process should be used for this ticket?', choices: names,
+      prompt: 'Which process?', choices: names,
       scoring: { mode: 'AUTO', points: 2, method: 'EXACT', gapTagOnWrong: 'INCORRECT_PROCESS', criteria: 'Matches the documented process for this ticket.' }
     }];
     if (tags.length >= 2) {
       qs.push({
         key: 'tag', type: 'MULTIPLE_CHOICE', required: true,
-        prompt: 'Which tag should be applied?', choices: tags,
+        prompt: 'Which tag?', choices: tags,
         scoring: { mode: 'AUTO', points: 1, method: 'EXACT', gapTagOnWrong: 'INCORRECT_TAG', criteria: 'Matches the documented tag for the process.' }
       });
     }
     if (checklists.length >= 2) {
       qs.push({
         key: 'checklist', type: 'MULTIPLE_CHOICE', required: true,
-        prompt: 'Which checklist/process should be launched?', choices: checklists,
+        prompt: 'Which checklist?', choices: checklists,
         scoring: { mode: 'AUTO', points: 1, method: 'EXACT', gapTagOnWrong: 'INCORRECT_CHECKLIST', criteria: 'Matches the documented interactive checklist for the process.' }
       });
     }
     qs.push({
       key: 'reasoning', type: 'SHORT_TEXT', required: false,
-      prompt: 'Optional: which detail in the ticket told you this?',
+      prompt: 'What told you? (optional)',
       scoring: { mode: 'MANUAL', points: 0, method: 'TRAINER', gapTagOnWrong: 'WEAK_REASONING', criteria: 'Not scored; used for coaching.' }
     });
     return qs;
@@ -101,11 +100,6 @@ var TRIAGE_TYPE = {
     });
     if (!isBlank(entry.tag)) correct.tag = entry.tag;
     if (!isBlank(entry.checklist)) correct.checklist = entry.checklist;
-    var missing = [isBlank(entry.tag) ? 'tag' : null, isBlank(entry.checklist) ? 'checklist' : null].filter(Boolean);
-    if (missing.length) {
-      flags.push(makeFlag('CATALOG_GAP', 'The catalog entry "' + entry.name + '" has no documented ' + missing.join(' or ') +
-        '; ' + (missing.length > 1 ? 'those questions were' : 'that question was') + ' left out for this ticket. Add them to the catalog entry if the Library documents them.', false));
-    }
     return {
       correctAnswer: correct,
       correctDecision: entry.name + (entry.tag ? ' / tag: ' + entry.tag : '') + (entry.checklist ? ' / checklist: ' + entry.checklist : ''),

@@ -17,30 +17,27 @@ var APPROVE_DENY_TYPE = {
   ],
 
   formInstructions: function (drill) {
-    return 'Approve or Deny speed drill. Target time: ' + drill.config.targetMinutes + ' minutes for all ' +
-      drill.config.scenarioCount + ' tickets.\n\n' +
-      'For each ticket, decide which retention action(s) the member qualifies for: Free month, MF reduction, ' +
-      'ETF waiver, or None of the above. Then name the exact account detail that supports your decision and ' +
-      'briefly explain it. Work from the ticket and account details only.';
+    return 'Approve or Deny \u2014 ' + drill.config.scenarioCount + ' tickets, about ' + drill.config.targetMinutes + ' minutes.\n' +
+      'For each ticket: pick the action, name the account detail that proves it, and say why in a sentence.';
   },
 
   questions: function () {
     return [
       {
         key: 'action', type: 'CHECKBOX', required: true,
-        prompt: 'What action should be taken? Select every action the member qualifies for, or "None of the above".',
+        prompt: 'What should you offer? (pick all that apply)',
         choices: APPROVE_DENY_ACTIONS.slice(),
-        scoring: { mode: 'AUTO', points: 2, method: 'EXACT_SET', gapTagOnWrong: 'INCORRECT_DECISION', criteria: 'Full credit only when the selected set exactly matches the answer key.' }
+        scoring: { mode: 'AUTO', points: 2, method: 'EXACT_SET', gapTagOnWrong: 'INCORRECT_DECISION', criteria: 'Full credit only when the picks match the answer key exactly.' }
       },
       {
         key: 'accountDetail', type: 'SHORT_TEXT', required: true,
-        prompt: 'What exact account detail supports your decision?',
-        scoring: { mode: 'MANUAL', points: 2, method: 'TRAINER', gapTagOnWrong: 'MISSING_ACCOUNT_DETAIL', criteria: 'Names the specific account fact from the answer key (not a general policy statement).' }
+        prompt: 'Which account detail tells you?',
+        scoring: { mode: 'MANUAL', points: 2, method: 'TRAINER', gapTagOnWrong: 'MISSING_ACCOUNT_DETAIL', criteria: 'Names the exact account fact, not a general policy.' }
       },
       {
         key: 'explanation', type: 'PARAGRAPH', required: true,
-        prompt: 'Briefly explain your decision.',
-        scoring: { mode: 'MANUAL', points: 1, method: 'TRAINER', gapTagOnWrong: 'WEAK_REASONING', criteria: 'Connects the account detail to the correct policy and does not rely on irrelevant facts.' }
+        prompt: 'Why? (1\u20132 sentences)',
+        scoring: { mode: 'MANUAL', points: 1, method: 'TRAINER', gapTagOnWrong: 'WEAK_REASONING', criteria: 'Links the detail to the right policy.' }
       }
     ];
   },
@@ -112,8 +109,9 @@ function commonScenarioOutputSchema() {
           properties: { sectionId: { type: 'string' }, quote: { type: 'string' }, supports: { type: 'string' } },
           required: ['sectionId', 'quote', 'supports']
         }
-      }
+      },
+      sourceConflict: { type: 'string' }
     },
-    required: ['insufficientSource', 'insufficientReason', 'title', 'ticket', 'accountDetails', 'rationale', 'commonMistakes', 'coachingNotes', 'citations']
+    required: ['insufficientSource', 'insufficientReason', 'title', 'ticket', 'accountDetails', 'rationale', 'commonMistakes', 'coachingNotes', 'citations', 'sourceConflict']
   };
 }

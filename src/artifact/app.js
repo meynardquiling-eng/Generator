@@ -3,8 +3,7 @@
 var S = {
   view: 'today', drillId: null, tab: 'scenarios',
   drills: [], bundle: null, settings: null, report: null, reportType: '',
-  catalog: [], snippets: [], sections: null, sourceFilter: '',
-  csq: { channelId: '', channelName: '', messages: [], search: [] },
+  catalog: [], sections: null, sourceFilter: '', sourceSummary: null, sourceRun: null,
   editing: {}, confirmRemove: null, respTrainee: '',
   busy: null, error: null, ready: false, fatal: null,
   caps: { db: false, sample: false, mcp: false, user: false }, canWrite: null, actor: 'unknown', names: {}
@@ -131,12 +130,7 @@ function go(view) {
   render();
   if (view === 'drills' || view === 'today') act('Loading drills', loadDrills);
   if (view === 'coaching') act('Building the coaching report', async function () { S.report = await svc.coachingReport({ drillType: S.reportType || undefined }); });
-  if (view === 'sources') act('Loading sources', async function () {
-    S.sections = await svc.getAllSections();
-    S.catalog = await svc.listCatalog();
-    S.snippets = await svc.listSnippets();
-    await loadSettings();
-  });
+  if (view === 'sources') act('Loading sources', loadSources);
   if (view === 'settings') act('Loading settings', loadSettings);
 }
 
@@ -167,11 +161,34 @@ function render() {
 
 function setupIssues() {
   var issues = [];
-  if (!S.caps.sample) issues.push('Claude is not available on this view, so scenarios must be written manually.');
-  if (!S.caps.mcp) issues.push('Connectors are not available on this view. Google Forms and source imports need the Google Drive connector.');
-  if (S.settings && isBlank(S.settings.bridgeFolderId)) issues.push('Form Bridge folder is not set. Open Settings and follow the bridge setup steps.');
-  if (S.settings && !S.settings.sourcesMeta) issues.push('Knowledge Library sections have not been imported yet. Open Sources and import them.');
+  if (!S.caps.sample) issues.push('Claude is off on this view, so tickets must be written by hand.');
+  if (!S.caps.mcp) issues.push('Connectors are off on this view. Google Forms and sources need the Google Drive connector.');
+  if (S.settings && isBlank(S.settings.bridgeFolderId)) issues.push('Add the Form Bridge folder ID in Settings.');
   return issues;
+}
+
+async function loadSources() {
+  S.sections = await svc.getAllSections();
+  S.catalog = await svc.listCatalog();
+  S.sourceSummary = await svc.sourceSummary();
+  await loadSettings();
+}
+
+// Runs on every page load: imports a newer Library export and re-pulls CSQ Slack.
+// When the bridge was asked for a new export, checks again after its next run.
+async function autoRefreshSources(force) {
+  try {
+    S.sourceRun = await svc.refreshSources({ force: !!force });
+    S.sourceSummary = await svc.sourceSummary();
+    await loadSettings();
+    S.sections = await svc.getAllSections();
+    if (S.sourceRun.library && S.sourceRun.library.status === 'REQUESTED' && !autoRefreshSources._timer) {
+      autoRefreshSources._timer = setTimeout(function () { autoRefreshSources._timer = null; autoRefreshSources(false); }, 6 * 60 * 1000);
+    }
+  } catch (e) {
+    S.sourceRun = { library: { status: 'ERROR', message: errorText(e) }, slack: [] };
+  }
+  if (!S.busy) render();
 }
 
 function viewToday() {
@@ -183,7 +200,7 @@ function viewToday() {
     issues.length ? h('section', { class: 'panel' }, h('h2', null, 'Finish setup'), h('ul', null, issues.map(function (i) { return h('li', null, i); }))) : null,
     h('section', { class: 'panel' },
       h('div', { class: 'row spread' }, h('h2', null, 'Today’s Approve or Deny drill'), h('span', { class: 'muted mono' }, t)),
-      h('p', { class: 'muted' }, ad.defaults.scenarioCount + ' complex membership tickets, ' + ad.defaults.targetMinutes + '-minute target. Generate, review, approve, then create the Google Form and share its link with trainees.'),
+      h('p', { class: 'muted' }, ad.defaults.scenarioCount + ' tickets \u00B7 ' + ad.defaults.targetMinutes + ' minutes \u00B7 mixed topics'),
       todays.length
         ? h('div', { class: 'stack' }, todays.map(function (d) {
             return h('div', { class: 'row spread panel flat' },
@@ -203,28 +220,53 @@ async function startToday() {
   if (S.caps.sample) generateAll(d.drillId);
 }
 
+function topicOptions() {
+  var lib = libraryTopics(S.sections || []);
+  var presetLabels = TOPIC_PRESETS.map(function (p) { return p.label; });
+  return { presets: presetLabels, library: lib.filter(function (t) { return presetLabels.indexOf(t) === -1; }) };
+}
+
+function chosenTopic() {
+  var v = val('nd-topic');
+  if (v === '__other') return val('nd-topic-other').trim();
+  return v;
+}
+
 function viewNewDrill() {
   var types = listDrillTypeSummaries();
+  var opts = topicOptions();
   var sel = h('select', { id: 'nd-type', onchange: function () {
     var t = types.filter(function (x) { return x.type === val('nd-type'); })[0];
     document.getElementById('nd-count').value = t.defaults.scenarioCount;
     document.getElementById('nd-min').value = t.defaults.targetMinutes;
     document.getElementById('nd-diff').value = t.defaults.difficulty;
   } }, types.map(function (t) { return h('option', { value: t.type }, t.name); }));
+  var topic = h('select', { id: 'nd-topic', onchange: function () {
+    var other = document.getElementById('nd-topic-other-wrap');
+    other.hidden = val('nd-topic') !== '__other';
+    if (!other.hidden) document.getElementById('nd-topic-other').focus();
+  } },
+    h('option', { value: '' }, 'Mixed (any topic)'),
+    h('optgroup', { label: 'Common topics' }, opts.presets.map(function (t) { return h('option', { value: t }, t); })),
+    opts.library.length ? h('optgroup', { label: 'From the Knowledge Library' }, opts.library.map(function (t) { return h('option', { value: t }, t); })) : null,
+    h('option', { value: '__other' }, 'Other (type your own)\u2026'));
   return h('section', { class: 'panel' },
     h('h2', null, 'New drill'),
     h('div', { class: 'fields' },
       field('Drill type', sel),
-      field('Scenarios', h('input', { id: 'nd-count', type: 'number', min: '1', max: '25', value: String(types[0].defaults.scenarioCount) })),
+      field('Topic', topic),
+      h('label', { class: 'field', id: 'nd-topic-other-wrap', hidden: true }, h('span', { class: 'label' }, 'Your topic'), h('input', { id: 'nd-topic-other', placeholder: 'e.g. Pause requests' })),
+      field('Tickets', h('input', { id: 'nd-count', type: 'number', min: '1', max: '25', value: String(types[0].defaults.scenarioCount) })),
       field('Difficulty', h('select', { id: 'nd-diff' }, ['EASY', 'MEDIUM', 'HARD'].map(function (d) { return h('option', { value: d, selected: d === types[0].defaults.difficulty }, d.charAt(0) + d.slice(1).toLowerCase()); }))),
-      field('Target minutes', h('input', { id: 'nd-min', type: 'number', min: '1', value: String(types[0].defaults.targetMinutes) })),
-      field('Title (optional)', h('input', { id: 'nd-title', placeholder: 'Shown as the form title' }))
+      field('Minutes', h('input', { id: 'nd-min', type: 'number', min: '1', value: String(types[0].defaults.targetMinutes) }))
     ),
-    h('div', { class: 'row' }, btn('Create drill', async function () {
-      var d = await act('Creating drill', function () {
-        return svc.createDrill({ drillType: val('nd-type'), scenarioCount: val('nd-count'), difficulty: val('nd-diff'), targetMinutes: val('nd-min'), title: val('nd-title') || undefined });
-      });
-      if (d) openDrill(d.drillId);
+    h('div', { class: 'row' }, btn('Create and generate', async function () {
+      var input = { drillType: val('nd-type'), topic: chosenTopic(), scenarioCount: val('nd-count'), difficulty: val('nd-diff'), targetMinutes: val('nd-min') };
+      if (val('nd-topic') === '__other' && !input.topic) { S.error = 'Type a topic, or pick one from the list.'; render(); return; }
+      var d = await act('Creating drill', function () { return svc.createDrill(input); });
+      if (!d) return;
+      await openDrill(d.drillId);
+      if (S.caps.sample) generateAll(d.drillId);
     }, { primary: true }))
   );
 }
@@ -238,11 +280,12 @@ function viewDrills() {
   return h('section', { class: 'panel' },
     h('h2', null, 'Drills'),
     h('div', { class: 'table-wrap' }, h('table', null,
-      h('thead', null, h('tr', null, ['Drill ID', 'Type', 'Created', 'Scenarios', 'Google Form', 'Submissions', 'Status'].map(function (c) { return h('th', null, c); }))),
+      h('thead', null, h('tr', null, ['Drill ID', 'Type', 'Topic', 'Created', 'Tickets', 'Google Form', 'Submissions', 'Status'].map(function (c) { return h('th', null, c); }))),
       h('tbody', null, S.drills.map(function (d) {
         return h('tr', { class: 'click', tabindex: '0', onclick: function () { openDrill(d.drillId); }, onkeydown: function (e) { if (e.key === 'Enter') openDrill(d.drillId); } },
           h('td', { class: 'mono' }, d.drillId),
           h('td', null, getDrillType(d.drillType).name),
+          h('td', null, d.topic || h('span', { class: 'muted' }, 'Mixed')),
           h('td', null, fmtDate(d.createdAt)),
           h('td', null, String(d.scenarioCount)),
           h('td', null, d.formStatus === 'NONE' ? h('span', { class: 'muted' }, 'Not created') : pill(d.formStatus === 'CREATED' ? 'Created' : 'Requested', d.formStatus === 'CREATED' ? 'accent' : 'warn')),
@@ -291,7 +334,7 @@ function viewDrill() {
         h('div', { class: 'stack', style: 'gap:4px' },
           h('span', { class: 'mono muted' }, d.drillId),
           h('h2', null, d.title),
-          h('span', { class: 'muted small' }, typeDef.name + ' · ' + d.config.scenarioCount + ' scenarios · ' + d.config.targetMinutes + ' min · ' + d.config.difficulty.toLowerCase() + ' · created ' + fmtDate(d.createdAt) + ' by ' + who(d.createdBy))),
+          h('span', { class: 'muted small' }, [typeDef.name, d.config.topic || 'Mixed topics', d.config.scenarioCount + ' tickets', d.config.targetMinutes + ' min', d.config.difficulty.toLowerCase()].join(' \u00B7 '))),
         statusPill(d.status)),
       h('div', { class: 'stepper', 'aria-label': 'Drill lifecycle' }, STEPS.map(function (s, i) {
         return h('span', { class: i < idx ? 'done' : i === idx ? 'now' : '' }, STEP_LABEL[s]);
@@ -362,22 +405,22 @@ function traineeView(s) {
 function tabScenarios(b, typeDef) {
   var list = activeScenarios(b.scenarios);
   if (!list.length) {
-    return h('section', { class: 'panel empty' }, h('h2', null, 'No scenarios yet'), h('p', null, 'Generate them from the approved sources, or write one manually. Nothing is final until you approve the drill.'));
+    return h('section', { class: 'panel empty' }, h('h2', null, 'No tickets yet'), h('p', null, 'Generate them, or write one by hand. Nothing goes to trainees until you approve.'));
   }
   var editable = isTraineeContentEditable(b.drill.status);
   return h('div', { class: 'stack' }, list.map(function (s) {
     var open = S.editing[s.scenarioId];
     var hintId = 'hint-' + s.scenarioId;
     return h('section', { class: 'panel' },
-      h('div', { class: 'scenario-head' }, h('span', { class: 'mono' }, s.scenarioId), pill('v' + s.version), pill(s.difficulty.toLowerCase()), s.category ? pill(s.category) : null, pill(s.generatedBy === 'MANUAL' ? 'written by trainer' : 'generated')),
+      h('div', { class: 'scenario-head' }, h('span', { class: 'mono' }, s.scenarioId), pill(s.difficulty.toLowerCase()), s.category ? pill(s.category) : null, s.generatedBy === 'MANUAL' ? pill('written by trainer') : null),
       (s.reviewFlags || []).length ? h('div', { class: 'stack', style: 'gap:6px' }, s.reviewFlags.map(function (f) { return flagView(b, s, f); })) : null,
       open ? scenarioEditor(b, s, editable) : h('div', { class: 'grid2' },
         h('div', { class: 'stack' }, h('span', { class: 'label' }, 'Trainee sees'), traineeView(s)),
-        h('div', { class: 'stack panel flat' }, h('span', { class: 'label' }, 'Answer key (trainers only)'),
-          h('p', null, h('strong', null, s.trainer.correctDecision || '—')),
-          h('p', { class: 'small' }, h('span', { class: 'muted' }, 'Deciding detail: '), s.trainer.requiredAccountDetail || '—'),
-          h('p', { class: 'small' }, s.trainer.rationale || ''),
-          sourceList(s.trainer.sources))),
+        h('div', { class: 'stack panel flat' }, h('span', { class: 'label' }, 'Answer (trainers only)'),
+          h('p', null, h('strong', null, s.trainer.correctDecision || '\u2014')),
+          h('p', { class: 'small' }, h('span', { class: 'muted' }, 'Key detail: '), s.trainer.requiredAccountDetail || '\u2014'),
+          h('details', { class: 'small' }, h('summary', null, 'Why and sources'),
+            h('p', { style: 'margin-block:6px' }, s.trainer.rationale || ''), sourceList(s.trainer.sources)))),
       open ? null : h('div', { class: 'row' },
         btn(editable ? 'Edit' : 'Edit answer key', function () { S.editing[s.scenarioId] = true; render(); }),
         editable ? h('input', { id: hintId, placeholder: 'Optional hint for regeneration', style: 'flex:1;min-width:200px' }) : null,
@@ -662,101 +705,56 @@ function viewCoaching() {
 
 // ---------------------------------------------------------------- Sources
 
+function libraryStatusText(meta, run) {
+  var st = run && run.library ? run.library.status : null;
+  if (st === 'ERROR') return { kind: 'bad', text: 'Could not refresh: ' + run.library.message };
+  if (st === 'NOT_CONFIGURED') return { kind: 'warn', text: 'Add the Form Bridge folder ID in Settings.' };
+  if (!meta) return { kind: 'warn', text: st === 'REQUESTED' ? 'Export requested. It loads automatically within about 5 minutes.' : 'Checking\u2026' };
+  return { kind: 'ok', text: meta.sections + ' sections \u00B7 updated ' + fmtDate(meta.generatedAt) + (st === 'REQUESTED' ? ' \u00B7 the doc changed, a newer copy is on its way' : '') };
+}
+
 function viewSources() {
-  var meta = S.settings && S.settings.sourcesMeta;
+  var sum = S.sourceSummary || { library: S.settings && S.settings.sourcesMeta, slack: [], channels: [] };
+  var lib = libraryStatusText(sum.library, S.sourceRun);
   var sections = S.sections || [];
   var f = normalizeText(S.sourceFilter);
   var matches = f ? sections.filter(function (s) { return normalizeText(s.path + ' ' + s.text).indexOf(f) !== -1; }) : sections;
-  var channels = (S.settings && S.settings.csqChannels) || [];
+  var runErrors = {};
+  ((S.sourceRun && S.sourceRun.slack) || []).forEach(function (r) { if (r.status === 'ERROR') runErrors[r.channel] = r.message; });
   return h('div', { class: 'stack' },
     h('section', { class: 'panel' },
-      h('h2', null, 'Care Knowledge Library'),
-      h('p', { class: 'muted' }, 'Scenarios and answer keys are generated only from these sections and approved CSQ snippets. Every cited quote is checked against them.'),
-      meta ? h('p', { class: 'small' }, meta.sections + ' sections from the export of ' + fmtDate(meta.generatedAt) + ', imported ' + fmtDate(meta.importedAt) + ' by ' + who(meta.importedBy) + '.') : h('div', { class: 'notice warn' }, 'Not imported yet.'),
-      h('div', { class: 'row' },
-        btn('Ask the bridge for a fresh export', function () { act('Writing the export request', function () { return svc.requestSourceRefresh(); }, 'Requested. The bridge exports within about 5 minutes; then import it.'); }),
-        btn('Import latest export', function () { act('Importing source sections', async function () { var r = await svc.importSources(); await loadSettings(); S.sections = await svc.getAllSections(); return r; }, function (r) {
-          if (!r) return '';
-          if (r.status === 'OK') return r.sections + ' sections imported';
-          S.error = noExportReason(r.bridge);
-          return '';
-        }); }, { primary: true })),
-      sections.length ? h('div', { class: 'stack' },
-        h('input', { id: 'src-filter', placeholder: 'Search sections (e.g. ETF, free month, lock-out)', value: S.sourceFilter, onchange: function () { S.sourceFilter = val('src-filter'); render(); } }),
-        h('p', { class: 'small muted' }, matches.length + ' of ' + sections.length + ' sections' + (matches.length > 40 ? ', showing 40' : '')),
-        matches.slice(0, 40).map(function (s) {
-          return h('details', { class: 'source-row' }, h('summary', null, pill(s.sourceType === 'CSQ_SLACK' ? 'CSQ Slack' : 'Library'), ' ', s.path || s.heading, ' ', h('span', { class: 'mono muted' }, s.sectionId)),
-            h('p', { class: 'small', style: 'white-space:pre-wrap;margin-top:6px' }, s.text.slice(0, 3000)), s.url ? h('a', { href: s.url, target: '_blank', rel: 'noopener', class: 'small' }, 'Open in Google Docs') : null);
-        })) : null),
-    h('section', { class: 'panel' },
-      h('h2', null, 'CSQ Slack snippets'),
-      h('p', { class: 'muted' }, 'Load recent messages from a CSQ channel and approve the ones that state current guidance. Only approved snippets are used as sources.'),
-      h('div', { class: 'row' },
-        h('select', { id: 'csq-ch', style: 'max-width:280px', onchange: function () { S.csq.channelId = val('csq-ch'); var c = channels.filter(function (x) { return x.id === S.csq.channelId; })[0]; S.csq.channelName = c ? c.name : ''; } },
-          h('option', { value: '' }, channels.length ? 'Choose a channel' : 'Add CSQ channels in Settings'),
-          channels.map(function (c) { return h('option', { value: c.id, selected: S.csq.channelId === c.id }, '#' + c.name); })),
-        btn('Load recent messages', function () {
-          if (!S.csq.channelId) { S.error = 'Choose a channel first.'; render(); return; }
-          act('Reading #' + (S.csq.channelName || S.csq.channelId), async function () { S.csq.messages = await svc.fetchCsqMessages(S.csq.channelId); });
-        }, { disabled: !S.caps.mcp, write: false })),
-      S.csq.messages.length ? h('div', { class: 'stack' }, S.csq.messages.map(function (m) {
-        return h('div', { class: 'panel flat' }, h('div', { class: 'row small muted' }, h('span', null, m.author || 'Unknown'), h('span', null, m.postedAt)),
-          h('p', { style: 'white-space:pre-wrap' }, m.text),
-          h('div', { class: 'row' }, btn('Approve as source', function () {
-            act('Approving snippet', async function () { await svc.approveSnippet(Object.assign({ channelName: S.csq.channelName }, m)); S.snippets = await svc.listSnippets(); S.sections = await svc.getAllSections(); }, 'Snippet approved');
-          })));
+      h('div', { class: 'row spread' }, h('h2', null, 'Sources'),
+        btn('Refresh now', function () { act('Refreshing sources', function () { return autoRefreshSources(true); }, 'Sources refreshed'); })),
+      h('p', { class: 'muted small' }, 'Updated automatically each time the dashboard opens. Tickets use only these sources.'),
+      h('div', { class: 'stack', style: 'gap:6px' },
+        h('div', { class: 'row' }, pill('Knowledge Library', lib.kind), h('span', { class: 'small' }, lib.text)),
+        sum.channels.map(function (ch) {
+          var pulled = sum.slack.filter(function (x) { return x.channelId === ch.id; })[0];
+          var err = runErrors[ch.name];
+          return h('div', { class: 'row' }, pill('#' + ch.name, err ? 'bad' : pulled ? 'ok' : 'warn'),
+            h('span', { class: 'small' }, err ? 'Could not read: ' + err : pulled ? pulled.messages + ' messages from the last 45 days \u00B7 ' + fmtDate(pulled.pulledAt) : 'Not pulled yet'));
+        }))),
+    sections.length ? h('section', { class: 'panel' },
+      h('input', { id: 'src-filter', placeholder: 'Search (e.g. ETF, free month, lockout)', value: S.sourceFilter, onchange: function () { S.sourceFilter = val('src-filter'); render(); } }),
+      h('p', { class: 'small muted' }, matches.length + ' of ' + sections.length + (matches.length > 40 ? ' \u00B7 showing 40' : '')),
+      matches.slice(0, 40).map(function (s) {
+        return h('details', { class: 'source-row' }, h('summary', null, pill(s.sourceType === 'CSQ_SLACK' ? 'Slack' : 'Library'), ' ', s.sourceType === 'CSQ_SLACK' ? s.heading : (s.path || s.heading)),
+          h('p', { class: 'small', style: 'white-space:pre-wrap;margin-top:6px' }, s.text.slice(0, 3000)), s.url ? h('a', { href: s.url, target: '_blank', rel: 'noopener', class: 'small' }, 'Open in Google Docs') : null);
       })) : null,
-      h('h3', null, 'Approved snippets'),
-      S.snippets.filter(function (x) { return x.status === 'APPROVED'; }).length ? S.snippets.filter(function (x) { return x.status === 'APPROVED'; }).map(function (sn) {
-        return h('div', { class: 'row spread panel flat' }, h('div', { style: 'min-width:0;flex:1' }, h('span', { class: 'small muted' }, '#' + (sn.channelName || sn.channelId) + ' · ' + (sn.author || '') + ' · ' + sn.postedAt), h('p', { class: 'small', style: 'white-space:pre-wrap' }, sn.text)),
-          btn('Withdraw', function () { act('Withdrawing snippet', async function () { await svc.setSnippetStatus(sn.snippetId, 'REJECTED'); S.snippets = await svc.listSnippets(); S.sections = await svc.getAllSections(); }); }, { danger: true }));
-      }) : h('p', { class: 'muted small' }, 'None approved yet.')),
     viewCatalog());
 }
 
-// Explains a missing source export from the bridge's own status file.
-function noExportReason(status) {
-  if (!status) {
-    return 'No export yet, and the Form Bridge has never reported a run. Update the bridge to the latest Code.js and appsscript.json, run runBridge once from the Apps Script editor (accept the new permissions), and check that a runBridge trigger exists under Triggers.';
-  }
-  var ran = fmtDate(status.finishedAt || status.startedAt);
-  if (status.steps && /^error/.test(status.steps.sources || '')) {
-    return 'The Form Bridge failed to export the Knowledge Library on its last run (' + ran + '): ' + status.steps.sources.replace(/^error: /, '');
-  }
-  return 'No export yet. The Form Bridge last ran ' + ran + '. If you just asked for an export, wait for its next run (every 5 minutes) and import again.';
-}
-
 function viewCatalog() {
-  var entries = S.catalog.slice().sort(function (a, b) { return a.status === b.status ? (a.name < b.name ? -1 : 1) : (a.status === 'APPROVED' ? -1 : 1); });
+  var entries = S.catalog.filter(function (e) { return e.status === 'APPROVED'; }).sort(function (a, b) { return a.name < b.name ? -1 : 1; });
   return h('section', { class: 'panel' },
-    h('h2', null, 'Triage process catalog'),
-    h('p', { class: 'muted' }, 'The answer choices for Triage-Only drills (process, tag, checklist) come only from approved entries here. Propose entries from the sources, check each against the Library, then approve.'),
-    h('div', { class: 'row' }, btn('Propose entries from sources', function () { act('Reading sources for documented processes', async function () { await svc.proposeCatalog(); S.catalog = await svc.listCatalog(); }); }, { disabled: !S.caps.sample })),
-    entries.length ? entries.map(function (e) {
-      var id = 'cat-' + e.catalogId;
-      return h('div', { class: 'panel flat' },
-        h('div', { class: 'row' }, h('span', { class: 'mono' }, e.catalogId), pill(e.status.toLowerCase(), e.status === 'APPROVED' ? 'ok' : e.status === 'REJECTED' ? 'bad' : 'warn')),
-        h('div', { class: 'fields' },
-          field('Process', h('input', { id: id + '-name', value: e.name })),
-          field('Tag', h('input', { id: id + '-tag', value: e.tag || '', placeholder: 'Not documented' })),
-          field('Checklist / process to launch', h('input', { id: id + '-check', value: e.checklist || '', placeholder: 'Not documented' })),
-          field('Category', h('select', { id: id + '-cat' }, TRIAGE_CATEGORIES.map(function (c) { return h('option', { value: c, selected: e.category === c }, c); })))),
-        field('When to use', h('input', { id: id + '-when', value: e.whenToUse || '' })),
-        sourceList(e.sources),
-        h('div', { class: 'row' },
-          h('input', { id: id + '-note', placeholder: 'Approval note (required when no quote was verified)', style: 'flex:1;min-width:220px' }),
-          btn('Save', function () { saveCatalog(e, null); }),
-          e.status !== 'APPROVED' ? btn('Approve', function () { saveCatalog(e, 'APPROVED'); }, { primary: true }) : null,
-          e.status !== 'REJECTED' ? btn('Reject', function () { saveCatalog(e, 'REJECTED'); }, { danger: true }) : null));
-    }) : h('p', { class: 'muted small' }, 'No entries yet.'));
-}
-
-function saveCatalog(e, status) {
-  var id = 'cat-' + e.catalogId;
-  act('Saving catalog entry', async function () {
-    await svc.updateCatalogEntry(e.catalogId, { name: val(id + '-name'), tag: val(id + '-tag'), checklist: val(id + '-check'), category: val(id + '-cat'), whenToUse: val(id + '-when'), status: status || undefined, note: val(id + '-note') });
-    S.catalog = await svc.listCatalog();
-  }, status ? 'Entry ' + status.toLowerCase() : 'Saved');
+    h('div', { class: 'row spread' }, h('h2', null, 'Triage processes'),
+      btn('Rebuild from sources', function () { act('Finding documented processes', async function () { await svc.proposeCatalog(); S.catalog = await svc.listCatalog(); }); }, { disabled: !S.caps.sample })),
+    h('p', { class: 'muted small' }, 'Answer choices for Triage drills. Built automatically from processes the sources spell out.'),
+    entries.length ? h('div', { class: 'table-wrap' }, h('table', null,
+      h('thead', null, h('tr', null, h('th', null, 'Process'), h('th', null, 'Tag'), h('th', null, 'Checklist'))),
+      h('tbody', null, entries.map(function (e) {
+        return h('tr', null, h('td', null, e.name), h('td', null, e.tag || h('span', { class: 'muted' }, '\u2014')), h('td', null, e.checklist || h('span', { class: 'muted' }, '\u2014')));
+      })))) : h('p', { class: 'muted small' }, 'Built the first time you create a Triage drill.'));
 }
 
 // ---------------------------------------------------------------- Settings
@@ -770,7 +768,7 @@ function viewSettings() {
         field('Form Bridge Drive folder ID', h('input', { id: 'set-folder', value: s.bridgeFolderId || '', placeholder: 'Logged by setupBridge()' })),
         field('Knowledge Library Google Doc ID', h('input', { id: 'set-doc', value: s.sourceDocId || '' }))),
       h('label', { class: 'check' }, h('input', { type: 'checkbox', id: 'set-email', checked: s.collectVerifiedEmail !== false }), 'Require Google sign-in and collect verified trainee emails (recommended)'),
-      field('CSQ Slack channels (one per line: "C0123ABC channel-name")', h('textarea', { id: 'set-csq' }, (s.csqChannels || []).map(function (c) { return c.id + ' ' + c.name; }).join('\n'))),
+      field('Slack channels used as sources (one per line: "C0123ABC channel-name")', h('textarea', { id: 'set-csq' }, (s.csqChannels && s.csqChannels.length ? s.csqChannels : DEFAULT_CSQ_CHANNELS).map(function (c) { return c.id + ' ' + c.name; }).join('\n'))),
       h('div', { class: 'row' }, btn('Save settings', function () {
         act('Saving settings', async function () {
           S.settings = await svc.saveSettings({
@@ -787,7 +785,7 @@ function viewSettings() {
         h('li', null, 'Paste the contents of src/bridge/Code.js and src/bridge/appsscript.json from the Generator repository.'),
         h('li', null, 'Run setupBridge once and accept the permissions. It creates the folder and a 5-minute trigger, then logs the folder ID.'),
         h('li', null, 'Paste that folder ID above. Share the folder with trainers only (Editor). Never share it with trainees.'),
-        h('li', null, 'On Sources, ask for a fresh export, wait a few minutes, then import.'))),
+        h('li', null, 'Sources then load on their own.'))),
     h('section', { class: 'panel' },
       h('h2', null, 'This view'),
       h('ul', { class: 'small' },
@@ -835,6 +833,7 @@ async function boot() {
     S.error = errorText(e);
   }
   render();
+  autoRefreshSources(false);
 }
 
 function noMcp() { return Promise.reject(ServiceError('NO_CONNECTORS', 'Connectors are not available on this view, so Google Drive cannot be reached.')); }

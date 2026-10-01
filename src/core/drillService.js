@@ -17,6 +17,18 @@
 var AUDIT_LIMIT = 300;
 var SOURCE_CHUNK_CHARS = 150000;
 var SOURCE_PROMPT_CHARS = 60000;
+var SLACK_STALE_MS = 6 * 3600 * 1000;
+var SLACK_DAYS = 45;
+var DEFAULT_CSQ_CHANNELS = [
+  { id: 'C0BL531GV0R', name: 'csq-claude-escalations' },
+  { id: 'C0B6W0XPQE4', name: 'csq-customer-care-control' },
+  { id: 'C0ASLRNN1RA', name: 'training_cohort-3-30-csq' },
+  { id: 'C096318TMDX', name: 'rr-tone-and-voice-csq' }
+];
+
+function csqChannels(settings) {
+  return settings && settings.csqChannels && settings.csqChannels.length ? settings.csqChannels : DEFAULT_CSQ_CHANNELS;
+}
 
 function createDrillService(deps) {
   var store = deps.store;
@@ -94,14 +106,6 @@ function createDrillService(deps) {
     chunks.sort(function (a, b) { return a.chunkId < b.chunkId ? -1 : 1; }).forEach(function (c) {
       sections = sections.concat(c.sections || []);
     });
-    var snippets = await store.list(COLLECTIONS.snippets, ['status', 'APPROVED']);
-    snippets.forEach(function (sn) {
-      sections.push({
-        sectionId: sn.snippetId, sourceType: 'CSQ_SLACK', title: 'CSQ Slack #' + (sn.channelName || sn.channelId),
-        heading: 'CSQ Slack #' + (sn.channelName || sn.channelId) + ' — ' + (sn.postedAt || sn.ts),
-        path: 'CSQ Slack #' + (sn.channelName || sn.channelId), url: sn.permalink || null, text: sn.text
-      });
-    });
     return sections;
   }
 
@@ -112,18 +116,22 @@ function createDrillService(deps) {
 
   async function buildContext(drill, typeDef, opts, scenarios) {
     opts = opts || {};
-    var sections = selectSections(await getAllSections(), typeDef.sourceKeywords, SOURCE_PROMPT_CHARS);
-    var catalog = typeDef.requiresCatalog ? await approvedCatalog() : [];
-    if (typeDef.requiresCatalog && catalog.length < 2) {
-      throw ServiceError('CATALOG_REQUIRED', 'Approve at least two process catalog entries (Sources → Triage process catalog) before generating ' + typeDef.name + ' scenarios.');
+    var topic = (drill.config && drill.config.topic) || '';
+    var all = await getAllSections();
+    if (topic && all.length && !sectionsMatchingTopic(all, topic).length) {
+      throw ServiceError('NO_SOURCE_MATERIAL', 'Nothing in the Knowledge Library or CSQ Slack mentions "' + topic + '". Try a different wording for the topic.');
     }
+    var sections = selectSections(all, typeDef.sourceKeywords, SOURCE_PROMPT_CHARS, topicKeywords(topic));
+    var catalog = typeDef.requiresCatalog ? await ensureCatalog() : [];
     var active = activeScenarios(scenarios || []);
     var category = opts.category || null;
-    if (!category && typeDef.categories) {
+    if (!category && !topic && typeDef.categories) {
       category = typeDef.categories[active.length % typeDef.categories.length];
     }
     return {
       drill: drill,
+      topic: topic,
+      today: clock.today(),
       difficulty: opts.difficulty || drill.config.difficulty,
       sections: sections,
       catalog: catalog,
@@ -163,14 +171,16 @@ function createDrillService(deps) {
         drillId = makeDrillId(typeDef.drillIdPrefix, today, sameDay.map(function (d) { return d.drillId; }).concat([drillId]));
       }
       var count = parseInt(input.scenarioCount, 10) || typeDef.defaults.scenarioCount;
+      var topic = String(input.topic || '').trim().slice(0, 80);
       var drill = {
         drillId: drillId, drillType: typeDef.type, drillDate: today,
-        title: input.title || typeDef.name,
+        title: input.title || (topic ? typeDef.name + ' · ' + topic : typeDef.name),
         status: DrillStatus.DRAFT,
         config: {
           scenarioCount: Math.max(1, Math.min(count, 25)),
           difficulty: DIFFICULTY_GUIDANCE[input.difficulty] ? input.difficulty : typeDef.defaults.difficulty,
-          targetMinutes: parseInt(input.targetMinutes, 10) || typeDef.defaults.targetMinutes
+          targetMinutes: parseInt(input.targetMinutes, 10) || typeDef.defaults.targetMinutes,
+          topic: topic
         },
         nextScenarioSeq: 1,
         createdAt: now(), createdBy: actor, updatedAt: now(),
@@ -187,7 +197,7 @@ function createDrillService(deps) {
     return drills.sort(function (a, b) { return a.createdAt < b.createdAt ? 1 : -1; }).map(function (d) {
       return {
         drillId: d.drillId, drillType: d.drillType, title: d.title, status: d.status, createdAt: d.createdAt,
-        drillDate: d.drillDate, scenarioCount: d.config.scenarioCount,
+        drillDate: d.drillDate, scenarioCount: d.config.scenarioCount, topic: d.config.topic || '',
         formStatus: d.form ? d.form.state : 'NONE', formUrl: d.form && d.form.publishedUrl,
         submissions: d.responseStats ? d.responseStats.responses : 0,
         trainees: d.responseStats ? d.responseStats.trainees : 0,
@@ -752,11 +762,11 @@ function createDrillService(deps) {
     return buildCoachingReport(drills, answers, scores);
   }
 
-  // ---- sources, CSQ Slack, triage catalog ---------------------------------
+  // ---- sources (Knowledge Library + CSQ Slack), triage catalog -------------
 
   async function requestSourceRefresh() {
     var settings = await requireFolder();
-    return bridge.requestSourceExport(settings.bridgeFolderId, settings.sourceDocId);
+    return bridge.requestSourceExport(settings.bridgeFolderId, settings.sourceDocId, now().replace(/[^0-9A-Za-z]/g, ''));
   }
 
   async function importSources() {
@@ -783,7 +793,8 @@ function createDrillService(deps) {
       await store.put(COLLECTIONS.sources, id, { chunkId: id, generatedAt: exp.generatedAt, docId: exp.docId, sections: chunks[i] });
     }
     for (var j = 0; j < oldChunks.length; j++) {
-      if (parseInt(oldChunks[j].chunkId.slice(3), 10) >= chunks.length) await store.remove(COLLECTIONS.sources, oldChunks[j].chunkId);
+      var cid = oldChunks[j].chunkId || '';
+      if (cid.indexOf('kl-') === 0 && parseInt(cid.slice(3), 10) >= chunks.length) await store.remove(COLLECTIONS.sources, cid);
     }
     var s2 = await getSettings();
     s2.sourcesMeta = { generatedAt: exp.generatedAt, importedAt: now(), importedBy: actor, sections: sections.length, chunks: chunks.length, docId: exp.docId };
@@ -791,31 +802,78 @@ function createDrillService(deps) {
     return { status: 'OK', sections: sections.length, generatedAt: exp.generatedAt };
   }
 
-  async function fetchCsqMessages(channelId) {
-    if (!deps.slack) throw ServiceError('NOT_AVAILABLE', 'Slack is not connected for this view.');
-    return deps.slack.readChannel(channelId);
+  // Automatic source refresh: imports a newer Library export, asks the bridge for a
+  // new export when the Library doc changed, and re-pulls CSQ Slack channels that are
+  // older than SLACK_STALE_MS. Safe to call on every page load.
+  async function refreshSources(opts) {
+    opts = opts || {};
+    var settings = await getSettings();
+    var result = { library: null, slack: [] };
+    if (isBlank(settings.bridgeFolderId)) {
+      result.library = { status: 'NOT_CONFIGURED' };
+    } else {
+      try {
+        var meta = settings.sourcesMeta || null;
+        var index = bridge.getSourceIndex ? await bridge.getSourceIndex(settings.bridgeFolderId) : null;
+        if (index && (!meta || index.generatedAt > meta.generatedAt)) {
+          result.library = await importSources();
+        } else {
+          var docModified = bridge.getDocModifiedTime ? await bridge.getDocModifiedTime(settings.sourceDocId) : null;
+          var stale = !index || (docModified && docModified > index.generatedAt);
+          if (stale || opts.force) {
+            var key = (opts.force ? now() : (docModified || clock.today())).replace(/[^0-9A-Za-z]/g, '');
+            await bridge.requestSourceExport(settings.bridgeFolderId, settings.sourceDocId, key);
+            result.library = { status: 'REQUESTED' };
+          } else {
+            result.library = { status: 'CURRENT', generatedAt: index.generatedAt };
+          }
+        }
+      } catch (e) {
+        result.library = { status: 'ERROR', message: e.message || String(e) };
+      }
+    }
+    if (deps.slack) {
+      var channels = csqChannels(settings);
+      for (var i = 0; i < channels.length; i++) {
+        var ch = channels[i];
+        var existing = await store.get(COLLECTIONS.sources, 'slack-' + ch.id);
+        var age = existing ? Date.parse(now()) - Date.parse(existing.pulledAt) : Infinity;
+        if (!opts.force && age < SLACK_STALE_MS) { result.slack.push({ channel: ch.name, status: 'CURRENT', messages: existing.sections.length }); continue; }
+        try {
+          var msgs = await deps.slack.readChannel(ch.id, { days: SLACK_DAYS });
+          var sections = slackSections(msgs, ch);
+          var kept = [], size = 0;
+          for (var k = 0; k < sections.length && size < SOURCE_CHUNK_CHARS; k++) { kept.push(sections[k]); size += JSON.stringify(sections[k]).length; }
+          await store.put(COLLECTIONS.sources, 'slack-' + ch.id, { chunkId: 'slack-' + ch.id, kind: 'SLACK', channelId: ch.id, channelName: ch.name, pulledAt: now(), sections: kept });
+          result.slack.push({ channel: ch.name, status: 'PULLED', messages: kept.length });
+        } catch (e) {
+          result.slack.push({ channel: ch.name, status: 'ERROR', message: e.message || String(e) });
+        }
+      }
+    }
+    return result;
   }
 
-  async function approveSnippet(snippet) {
-    if (isBlank(snippet.text)) throw ServiceError('EMPTY', 'Snippet text is empty.');
-    var id = 'csq-' + hashString(snippet.channelId + '|' + snippet.ts + '|' + snippet.text);
-    var doc = {
-      snippetId: id, channelId: snippet.channelId, channelName: snippet.channelName || '', ts: snippet.ts || '',
-      postedAt: snippet.postedAt || '', author: snippet.author || '', permalink: snippet.permalink || '',
-      text: String(snippet.text), status: 'APPROVED', approvedBy: actor, approvedAt: now()
-    };
-    await store.put(COLLECTIONS.snippets, id, doc);
-    return doc;
+  async function sourceSummary() {
+    var settings = await getSettings();
+    var chunks = await store.list(COLLECTIONS.sources);
+    var slack = chunks.filter(function (c) { return c.kind === 'SLACK'; }).map(function (c) {
+      return { channelId: c.channelId, channel: c.channelName, messages: (c.sections || []).length, pulledAt: c.pulledAt };
+    });
+    return { library: settings.sourcesMeta || null, slack: slack, channels: csqChannels(settings) };
   }
 
-  async function setSnippetStatus(snippetId, status) {
-    var doc = await store.get(COLLECTIONS.snippets, snippetId);
-    if (!doc) throw ServiceError('NOT_FOUND', 'Snippet not found.');
-    doc.status = status === 'APPROVED' ? 'APPROVED' : 'REJECTED';
-    doc.statusBy = actor;
-    doc.statusAt = now();
-    await store.put(COLLECTIONS.snippets, snippetId, doc);
-    return doc;
+  // Triage answer choices come from documented processes. Entries backed by a quote that
+  // is really in the sources are used automatically; unbacked ones are dropped.
+  async function ensureCatalog() {
+    var approved = await approvedCatalog();
+    if (approved.length >= 2) return approved;
+    await proposeCatalog();
+    approved = await approvedCatalog();
+    if (approved.length < 2) {
+      throw ServiceError('CATALOG_REQUIRED', 'Could not find at least two documented triage processes in the sources. Refresh sources and try again.');
+    }
+    return approved;
   }
 
   async function proposeCatalog() {
@@ -827,7 +885,10 @@ function createDrillService(deps) {
       var id = 'PROC-' + hashString(normalizeText(e.name)).slice(0, 6).toUpperCase();
       var existing = await store.get(COLLECTIONS.catalog, id);
       if (existing && existing.status === 'APPROVED') continue;
-      var doc = Object.assign({ catalogId: id, status: 'PROPOSED', proposedAt: now(), proposedBy: actor }, e);
+      var verified = (e.sources || []).some(function (x) { return x.verified; });
+      var doc = Object.assign({ catalogId: id, proposedAt: now(), proposedBy: actor }, e, {
+        status: verified ? 'APPROVED' : 'REJECTED', approvedBy: verified ? 'auto (verified quote)' : null
+      });
       await store.put(COLLECTIONS.catalog, id, doc);
       saved.push(doc);
     }
@@ -880,9 +941,8 @@ function createDrillService(deps) {
     syncResponses: syncResponses, scoreAnswer: scoreAnswer, acceptAutoScores: acceptAutoScores,
     completeDrill: completeDrill, reopenReview: reopenReview, coachingReport: coachingReport,
     requestSourceRefresh: requestSourceRefresh, importSources: importSources, getAllSections: getAllSections,
-    fetchCsqMessages: fetchCsqMessages, approveSnippet: approveSnippet, setSnippetStatus: setSnippetStatus,
+    refreshSources: refreshSources, sourceSummary: sourceSummary,
     proposeCatalog: proposeCatalog, updateCatalogEntry: updateCatalogEntry,
-    listCatalog: function () { return store.list(COLLECTIONS.catalog); },
-    listSnippets: function () { return store.list(COLLECTIONS.snippets); }
+    listCatalog: function () { return store.list(COLLECTIONS.catalog); }
   };
 }

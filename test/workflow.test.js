@@ -363,25 +363,16 @@ test('an export for a different form is refused', async () => {
   await assert.rejects(env.svc.syncResponses(drillId), /different form/);
 });
 
-test('triage drill requires an approved catalog and takes choices from it', async () => {
+test('triage drill builds its process catalog automatically from verified quotes', async () => {
   const env = await setup();
   const d = await env.svc.createDrill({ drillType: 'TRIAGE' });
   assert.equal(d.config.targetMinutes, 30);
-  await assert.rejects(env.svc.generateNextScenario(d.drillId), /Approve at least two process catalog entries/);
-
-  const proposed = await env.svc.proposeCatalog();
-  const invented = proposed.find(e => e.name === 'Invented Process');
-  assert.ok(invented.flags.find(f => f.code === 'UNVERIFIED_SOURCE'));
-  await assert.rejects(env.svc.updateCatalogEntry(invented.catalogId, { status: 'APPROVED' }), /No verified source/);
-  for (const e of proposed.filter(x => x.name !== 'Invented Process')) {
-    await env.svc.updateCatalogEntry(e.catalogId, { status: 'APPROVED' });
-  }
-
   const s = await env.svc.generateNextScenario(d.drillId);
+  const catalog = await env.svc.listCatalog();
+  assert.equal(catalog.find(e => e.name === 'Invented Process').status, 'REJECTED', 'entry without a verified quote is dropped');
   assert.equal(s.scenarioId, 'TR-001');
   const proc = s.trainee.questions.find(q => q.key === 'process');
   assert.deepEqual(plain(proc.choices.slice().sort()), ['Lockout Refund', 'Unused Voucher']);
-  assert.ok(!proc.choices.includes('Invented Process'));
   assert.equal(s.trainer.correctAnswer.process, 'Lockout Refund');
   assert.equal(s.trainer.correctAnswer.tag, 'lockout_refund');
   assert.equal(s.trainer.correctAnswer.checklist, 'Lockout Checklist');
@@ -390,8 +381,6 @@ test('triage drill requires an approved catalog and takes choices from it', asyn
 
 test('triage auto-scoring for process, tag and checklist', async () => {
   const env = await setup();
-  const cat = await env.svc.proposeCatalog();
-  for (const e of cat.filter(x => x.name !== 'Invented Process')) await env.svc.updateCatalogEntry(e.catalogId, { status: 'APPROVED' });
   const d = await env.svc.createDrill({ drillType: 'TRIAGE', scenarioCount: 1 });
   await env.svc.generateNextScenario(d.drillId);
   await env.svc.approveDrill(d.drillId);
@@ -457,4 +446,55 @@ test('missing source export reports the bridge status, and a real export imports
   r = await env.svc.importSources();
   assert.equal(r.status, 'OK');
   assert.equal(r.sections, 1);
+});
+
+
+test('topic steers sources and prompt; an unknown topic is refused', async () => {
+  const env = await setup();
+  const d = await env.svc.createDrill({ drillType: 'APPROVE_DENY', topic: 'ETF waivers' });
+  assert.equal(d.config.topic, 'ETF waivers');
+  assert.match(d.title, /ETF waivers/);
+  await env.svc.generateNextScenario(d.drillId);
+  const prompt = env.llm.prompts[0];
+  assert.match(prompt, /TOPIC: every ticket in this drill must be about "ETF waivers"/);
+  assert.match(prompt, /Today is Oct 1, 2026\./);
+  assert.ok(prompt.indexOf('KL-ret-2') < prompt.indexOf('KL-ret-1'), 'ETF section is ranked first');
+  const odd = await env.svc.createDrill({ drillType: 'APPROVE_DENY', topic: 'Pet grooming' });
+  await assert.rejects(env.svc.generateNextScenario(odd.drillId), /Nothing in the Knowledge Library or CSQ Slack mentions "Pet grooming"/);
+});
+
+test('stale dates trigger one automatic rewrite', async () => {
+  const env = await setup();
+  const d = await env.svc.createDrill({ drillType: 'APPROVE_DENY' });
+  env.llm.queue(out => Object.assign(out, { accountDetails: [{ label: 'Signed up', value: 'Mar 3, 2022' }] }));
+  const s = await env.svc.generateNextScenario(d.drillId);
+  assert.equal(env.llm.calls, 2);
+  assert.match(env.llm.prompts[1], /Date "Mar 3, 2022" is not current/);
+  assert.ok(!JSON.stringify(s.trainee).includes('2022'));
+  assert.ok(!s.reviewFlags.find(f => f.code === 'STYLE'));
+});
+
+test('sources refresh automatically: newer export imported, changed doc re-requested, Slack pulled', async () => {
+  const env = await setup();
+  const slackReads = [];
+  const svc = env.core.createDrillService({
+    store: env.store, bridge: env.bridge, llm: env.llm, clock: env.clock, actor: 't', sleepMs: 1,
+    slack: { readChannel: async (id) => { slackReads.push(id); return [{ ts: '1', postedAt: '2026-09-30 10:00 CDT', author: 'Lead', text: 'Reminder: lock-out refunds need the cleaner photo before approval.' }, { ts: '2', postedAt: 'x', text: 'thanks!' }]; } }
+  });
+  env.bridge.sourceExport = { generatedAt: '2026-10-01T09:00:00Z', docId: 'doc-1', sections: [{ sectionId: 'KL-x', sourceType: 'KNOWLEDGE_LIBRARY', path: 'A > B', text: 'Library text' }] };
+  let r = await svc.refreshSources();
+  assert.equal(r.library.status, 'OK');
+  assert.equal(r.slack.length, 4, 'default CSQ channels, including #csq-claude-escalations');
+  assert.ok(slackReads.includes('C0BL531GV0R'));
+  const sections = await svc.getAllSections();
+  const slack = sections.filter(s => s.sourceType === 'CSQ_SLACK');
+  assert.equal(slack.length, 4, 'one useful message per channel; short chatter dropped');
+  r = await svc.refreshSources();
+  assert.equal(r.library.status, 'CURRENT');
+  assert.ok(r.slack.every(x => x.status === 'CURRENT'), 'Slack not re-pulled within 6 hours');
+  env.bridge.docModified = '2026-10-01T11:00:00Z';
+  r = await svc.refreshSources();
+  assert.equal(r.library.status, 'REQUESTED');
+  await svc.refreshSources();
+  assert.equal(Object.keys(env.bridge.sourceRequests).length, 1, 'same doc edit is requested once');
 });

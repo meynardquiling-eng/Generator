@@ -108,10 +108,26 @@ test('json check catches missing fields and bad enums', () => {
   assert.ok(problems.some(p => p.includes('must be one of')));
 });
 
-test('catalog gap names every missing part', () => {
+test('undocumented tag and checklist questions are left out without a flag', () => {
   const t = core.getDrillType('TRIAGE');
   const catalog = [{ catalogId: 'P1', name: 'Unused Voucher', tag: '', checklist: '' }, { catalogId: 'P2', name: 'Lockout', tag: 'x', checklist: 'y' }];
   const key = t.buildAnswerKey({ correctProcessId: 'P1', requiredAccountDetail: 'd', category: 'Voucher refund' }, { catalog }, t.questions({ catalog }));
-  assert.match(key.flags[0].message, /no documented tag or checklist; those questions were left out/);
+  assert.equal(key.flags.length, 0);
   assert.deepEqual(plain(key.questions.map(q => q.key)), ['process', 'reasoning']);
+});
+
+test('readability check catches stale dates and wordy tickets', () => {
+  const ok = { title: 'Wants to cancel', ticket: 'Please cancel my plan.', accountDetails: [{ label: 'Last cleaning', value: 'Sep 22, 2026' }], rationale: 'Short.' };
+  assert.deepEqual(plain(core.checkReadability(ok, '2026-10-01')), []);
+  const old = Object.assign({}, ok, { accountDetails: [{ label: 'Signed up', value: 'March 3, 2023' }, { label: 'Paid', value: '2024-01-05' }] });
+  assert.equal(core.checkReadability(old, '2026-10-01').filter(p => /not current/.test(p)).length, 2);
+  const long = Object.assign({}, ok, { ticket: 'word '.repeat(120) });
+  assert.ok(core.checkReadability(long, '2026-10-01').some(p => /words/.test(p)));
+});
+
+test('topic keywords and library topics', () => {
+  assert.ok(core.topicKeywords('Lockout tickets').includes('locked out'));
+  assert.deepEqual(plain(core.topicKeywords('Pet hair complaints')), ['pet hair complaints', 'pet', 'hair', 'complaints']);
+  const sections = [{ sourceType: 'KNOWLEDGE_LIBRARY', path: 'Unused DHJ Voucher > A', text: 'x' }, { sourceType: 'KNOWLEDGE_LIBRARY', path: 'Unused DHJ Voucher > B', text: 'y' }, { sourceType: 'KNOWLEDGE_LIBRARY', path: 'Welcome Page > A', text: 'z' }, { sourceType: 'KNOWLEDGE_LIBRARY', path: 'Welcome Page > B', text: 'z' }];
+  assert.deepEqual(plain(core.libraryTopics(sections)), ['Unused DHJ Voucher']);
 });

@@ -32,8 +32,7 @@ var COLLECTIONS = {
   scenarios: 'scenarios',    // <drillId>__<scenarioId>
   responses: 'responses',    // <drillId>__<responseId>
   catalog: 'catalog',        // catalogId
-  sources: 'sources',        // kl-000, kl-001 ... (chunks of source sections)
-  snippets: 'snippets',      // approved CSQ Slack snippets
+  sources: 'sources',        // kl-000... Library chunks, slack-<channelId> CSQ channel pulls
   settings: 'settings'       // 'main'
 };
 

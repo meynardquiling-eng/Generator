@@ -39,3 +39,15 @@ function slackPayloadText(payload) {
   }
   return JSON.stringify(payload);
 }
+
+// Turn parsed messages into source sections. Short chatter ("thanks!", "+1") is dropped.
+function slackSections(messages, channel) {
+  return (messages || []).filter(function (m) { return m.text && m.text.length >= 25; }).map(function (m) {
+    return {
+      sectionId: 'SL-' + hashString(channel.id + '|' + m.ts + '|' + m.text),
+      sourceType: 'CSQ_SLACK', title: '#' + channel.name,
+      heading: '#' + channel.name + ' \u00B7 ' + m.postedAt,
+      path: 'CSQ Slack #' + channel.name, url: null, postedAt: m.postedAt, text: m.text
+    };
+  });
+}

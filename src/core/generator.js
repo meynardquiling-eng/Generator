@@ -4,24 +4,29 @@
 // llm interface: await llm.generateJson({ system, user, schema }) -> parsed object.
 
 var GENERATOR_SYSTEM_PROMPT = [
-  'You write realistic customer-service training scenarios for Homeaglow Care trainees, plus the trainer answer key.',
-  'Ground every policy statement in the <source> sections provided. They are the only approved policy. Do not use outside knowledge of how retention or refunds "usually" work.',
-  'For every claim in the answer key (the decision, the rationale, and why the required account detail matters) add a citation: the source id and a short quote copied verbatim from that source. Never paraphrase inside a quote.',
-  'If the sources do not clearly establish the correct answer for the scenario you want to write, write a different scenario that they do cover. If none is possible, set insufficientSource to true and explain what is missing in insufficientReason. Never fill a gap with a plausible-sounding policy.',
-  'The ticket must read like a real customer message (first person, natural tone). Put the facts an agent would see in their tools into accountDetails as short label/value pairs: plan, dates, payment history, visits, prior agent actions, notes.',
-  'Make the scenario hard through its facts, not through convoluted wording. Do not state the answer, hint at the policy name, or mention "the correct action" anywhere in the ticket or account details.',
-  'rationale, commonMistakes and coachingNotes are for the trainer only and should be specific to this case.'
+  'You write customer-service training tickets for Homeaglow Care trainees, plus the trainer answer key.',
+  'Use ONLY the <source> sections provided: Knowledge Library sections (official policy) and CSQ Slack messages (recent clarifications from leads). Do not use outside knowledge of how retention or refunds "usually" work.',
+  'For every claim in the answer key add a citation: the source id and a short quote copied word for word from that source. Never paraphrase inside a quote.',
+  'If the Knowledge Library and a Slack message disagree, follow the more recent clarification and describe the disagreement in sourceConflict; otherwise leave sourceConflict empty.',
+  'If the sources do not clearly give the correct answer, write a different ticket that they do cover. If none is possible, set insufficientSource to true and say what is missing in insufficientReason. Never invent a policy.',
+  'STYLE. Write like a real customer: short, plain, everyday words (easy for a new hire to read). Title: 3 to 6 words. Ticket: 2 to 4 short sentences, under 80 words. No long backstory.',
+  'Account details: 3 to 6 short label/value pairs, each value a few words (for example "Plan: FCF $19/month", "Last cleaning: Sep 22, 2026"). Include only facts an agent would check, plus at most one that does not matter.',
+  'DATES. Use current dates. Every date must be within the last 12 months of today (scheduled cleanings may be up to 2 months ahead). Write dates like "Sep 22, 2026".',
+  'Do not state the answer, name the policy, or hint at "the correct action" in the ticket or account details.',
+  'Trainer-only fields: rationale in 1 to 2 short sentences; at most 2 common mistakes, each one short line; coaching note in one sentence.'
 ].join('\n');
 
 function buildGenerationPrompt(typeDef, ctx) {
   var parts = [];
+  parts.push('Today is ' + humanDate(ctx.today) + '.');
+  if (ctx.topic) parts.push('TOPIC: every ticket in this drill must be about "' + ctx.topic + '". Use the sources about this topic.');
   parts.push(typeDef.promptGuidance(ctx));
   parts.push('Difficulty: ' + ctx.difficulty + ' — ' + (DIFFICULTY_GUIDANCE[ctx.difficulty] || ''));
   if (ctx.avoid && ctx.avoid.length) {
     parts.push('Already used in this drill (write something clearly different):\n' + ctx.avoid.map(function (t) { return '- ' + t; }).join('\n'));
   }
   if (ctx.trainerHint) parts.push('Trainer request for this scenario: ' + ctx.trainerHint);
-  parts.push('Approved sources:\n\n' + formatSectionsForPrompt(ctx.sections));
+  parts.push('Sources:\n\n' + formatSectionsForPrompt(ctx.sections));
   return { system: GENERATOR_SYSTEM_PROMPT, user: parts.join('\n\n') };
 }
 
@@ -36,6 +41,17 @@ async function generateScenarioContent(typeDef, ctx, llm) {
   if (problems.length) {
     throw ServiceError('BAD_MODEL_OUTPUT', 'Generated scenario did not match the expected structure: ' + problems.slice(0, 5).join('; '));
   }
+  // One automatic rewrite when the ticket is too wordy or its dates are stale.
+  var style = ctx.today ? checkReadability(output, ctx.today) : [];
+  if (style.length) {
+    var retry = await llm.generateJson({
+      system: prompt.system,
+      user: prompt.user + '\n\nYour previous answer broke these rules. Fix them and keep the same answer key:\n- ' + style.join('\n- ') +
+        '\n\nPrevious answer:\n' + JSON.stringify(output),
+      schema: schema
+    });
+    if (!checkJsonAgainstSchema(retry, schema).length) output = retry;
+  }
   return output;
 }
 
@@ -49,6 +65,11 @@ function buildScenarioParts(typeDef, ctx, output) {
     rationale: '', commonMistakes: [], coachingNotes: '', citations: []
   };
 
+  if (!isBlank(out.sourceConflict)) {
+    flags.push(makeFlag('SOURCE_CONFLICT', 'The Library and a Slack clarification disagree: ' + out.sourceConflict, false));
+  }
+  var styleLeft = output && ctx.today ? checkReadability(out, ctx.today) : [];
+  if (styleLeft.length) flags.push(makeFlag('STYLE', styleLeft.join(' '), false));
   if (out.insufficientSource) {
     flags.push(makeFlag('INSUFFICIENT_SOURCE', 'Generator reported the sources do not support an answer: ' + (out.insufficientReason || '(no reason given)'), true));
   }

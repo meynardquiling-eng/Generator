@@ -110,9 +110,17 @@ function makeDriveBridge(mcp) {
     },
     getFormResult: function (folderId, drillId) { return readJson(folderId, 'drillform-result__' + drillId + '.json'); },
     getResponses: function (folderId, drillId) { return readJson(folderId, 'drillform-responses__' + drillId + '.json'); },
-    async requestSourceExport(folderId, docId) {
-      await writeNew(folderId, 'drill-sources-request__' + Date.now() + '.json', { kind: 'SOURCE_REQUEST', docId: docId, requestedAt: new Date().toISOString() });
+    // One request per key (the doc's last-edit time, or "now" for a manual refresh).
+    async requestSourceExport(folderId, docId, key) {
+      var title = 'drill-sources-request__' + (key || Date.now()) + '.json';
+      if (await findFile(folderId, title)) return { requested: true, reused: true };
+      await writeNew(folderId, title, { kind: 'SOURCE_REQUEST', docId: docId, requestedAt: new Date().toISOString() });
       return { requested: true };
+    },
+    getSourceIndex: function (folderId) { return readJson(folderId, 'drill-sources__index.json'); },
+    async getDocModifiedTime(docId) {
+      var res = await mcp.callTool(DRIVE, 'get_file_metadata', { fileId: docId, excludeContentSnippets: true }, { cache: false });
+      return (res.payload && res.payload.modifiedTime) || null;
     },
     getBridgeStatus: function (folderId) { return readJson(folderId, 'drill-bridge__status.json'); },
     async getSourceExport(folderId) {
@@ -131,9 +139,22 @@ function makeDriveBridge(mcp) {
 
 function makeSlackReader(mcp) {
   return {
-    async readChannel(channelId) {
-      var res = await mcp.callTool(SLACK, 'slack_read_channel', { channel_id: channelId, limit: 100, response_format: 'detailed' }, { cache: false });
-      return parseSlackChannelText(slackPayloadText(res.payload), channelId);
+    // Up to 3 pages (300 messages) from the last `days` days.
+    async readChannel(channelId, opts) {
+      var days = (opts && opts.days) || 45;
+      var oldest = String(Math.floor(Date.now() / 1000 - days * 86400));
+      var cursor = null, messages = [];
+      for (var page = 0; page < 3; page++) {
+        var input = { channel_id: channelId, limit: 100, oldest: oldest, response_format: 'detailed' };
+        if (cursor) input.cursor = cursor;
+        var res = await mcp.callTool(SLACK, 'slack_read_channel', input, { cache: false });
+        messages = messages.concat(parseSlackChannelText(slackPayloadText(res.payload), channelId));
+        var info = res.payload && res.payload.pagination_info;
+        var m = /cursor:\s*`([^`]+)`/.exec(String(info || ''));
+        if (!m) break;
+        cursor = m[1];
+      }
+      return messages;
     },
     async searchChannels(term) {
       var res = await mcp.callTool(SLACK, 'slack_search_channels', { keywords: [term], natural_language_query: term + ' channels', response_format: 'concise', limit: 20 }, { cache: false });

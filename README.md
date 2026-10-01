@@ -91,13 +91,23 @@ corrections are still allowed and rescore existing responses.
 
 ## Source grounding
 
-- Scenarios are generated only from imported Knowledge Library sections and trainer-approved
-  CSQ Slack snippets. With no matching sections, generation refuses instead of guessing.
+- Sources refresh automatically each time the dashboard opens: a newer Knowledge Library export
+  is imported, a new export is requested when the Library doc changes, and the CSQ Slack
+  channels (default: #csq-claude-escalations, #csq-customer-care-control,
+  #training_cohort-3-30-csq, #rr-tone-and-voice-csq; editable in Settings) are re-pulled when
+  older than 6 hours (last 45 days of messages). No approval step.
+- Scenarios are generated only from those sources. With no matching sections, generation
+  refuses instead of guessing. When the Library and a Slack clarification disagree, the
+  ticket gets a note for the trainer.
+- Each drill can have a topic (preset, a Knowledge Library tab, or free text). The topic
+  ranks matching sources first and every ticket is written about it.
 - Every answer key cites quotes; each quote is checked verbatim (whitespace and quote style
   normalized) against the sources. Unverified quotes, "sources insufficient" answers and manual
   scenarios raise blocking flags that a trainer must resolve with a note before approval.
-- Triage answer choices (process, tag, checklist) come only from the approved process catalog,
-  whose entries are themselves extracted from the sources and approved by a trainer.
+- Triage answer choices (process, tag, checklist) come from a process catalog built
+  automatically from the sources; only entries backed by a verified quote are used.
+- Tickets are short and plain (under ~80 words, 3-6 short account details) and every date is
+  within the last 12 months. A ticket that breaks these rules is rewritten once automatically.
 
 ## Scoring
 
@@ -122,15 +132,12 @@ No other code changes are needed for generation, forms, mapping, scoring or coac
 2. **Form Bridge**: create an Apps Script project, paste `src/bridge/Code.js` and
    `src/bridge/appsscript.json`, run `setupBridge()`, and accept the permissions. Copy the
    logged folder ID into the dashboard's Settings. Share that folder with trainers (Editor) only.
-3. **Sources**: in the dashboard, Sources → "Ask the bridge for a fresh export", wait for the
-   next bridge run, then "Import latest export". Add CSQ channel IDs in Settings to review and
-   approve Slack snippets.
-4. **Triage**: Sources → "Propose entries from sources", check each entry, approve at least two.
+3. **Sources**: nothing to do; they load on their own. Sources → "Refresh now" forces a refresh.
 
 ## Development
 
 ```bash
-npm test          # 36 tests: lifecycle, grounding, idempotency, mapping, scoring, coaching
+npm test          # 44 tests: lifecycle, grounding, idempotency, mapping, scoring, coaching
 npm run build     # writes dist/trainer-dashboard.html
 ```
 

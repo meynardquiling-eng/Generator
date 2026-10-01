@@ -368,8 +368,7 @@ var COLLECTIONS = {
   scenarios: 'scenarios',    // <drillId>__<scenarioId>
   responses: 'responses',    // <drillId>__<responseId>
   catalog: 'catalog',        // catalogId
-  sources: 'sources',        // kl-000, kl-001 ... (chunks of source sections)
-  snippets: 'snippets',      // approved CSQ Slack snippets
+  sources: 'sources',        // kl-000... Library chunks, slack-<channelId> CSQ channel pulls
   settings: 'settings'       // 'main'
 };
 
@@ -492,22 +491,25 @@ function blockingFlags(scenario) {
 
 var MIN_QUOTE_LENGTH = 12;
 
-function selectSections(sections, keywords, maxChars) {
+// priorityKeywords (the drill topic) outweigh the drill type's own keywords.
+function selectSections(sections, keywords, maxChars, priorityKeywords) {
   maxChars = maxChars || 60000;
-  var kws = (keywords || []).map(normalizeText).filter(Boolean);
+  var groups = [[(keywords || []).map(normalizeText).filter(Boolean), 1], [(priorityKeywords || []).map(normalizeText).filter(Boolean), 6]];
   var scored = sections.map(function (s) {
     var heading = normalizeText(s.path || s.heading);
     var text = normalizeText(s.text);
     var score = 0;
-    kws.forEach(function (k) {
-      if (heading.indexOf(k) !== -1) score += 5;
-      var idx = text.indexOf(k);
-      var hits = 0;
-      while (idx !== -1 && hits < 10) {
-        hits++;
-        idx = text.indexOf(k, idx + k.length);
-      }
-      score += hits;
+    groups.forEach(function (g) {
+      g[0].forEach(function (k) {
+        if (heading.indexOf(k) !== -1) score += 5 * g[1];
+        var idx = text.indexOf(k);
+        var hits = 0;
+        while (idx !== -1 && hits < 10) {
+          hits++;
+          idx = text.indexOf(k, idx + k.length);
+        }
+        score += hits * g[1];
+      });
     });
     return { section: s, score: score };
   }).filter(function (x) { return x.score > 0; });
@@ -570,8 +572,6 @@ function sourceFlags(verifiedSources, sectionsProvided) {
   var verified = verifiedSources.filter(function (s) { return s.verified; });
   if (!verifiedSources.length || !verified.length) {
     flags.push(makeFlag('UNVERIFIED_SOURCE', 'None of the cited quotes could be found in the approved sources. Confirm the answer key against the source before approving.', true));
-  } else if (verified.length < verifiedSources.length) {
-    flags.push(makeFlag('PARTIAL_SOURCE', (verifiedSources.length - verified.length) + ' cited quote(s) could not be found in the source and were marked unverified.', false));
   }
   return flags;
 }
@@ -628,6 +628,108 @@ function describeSchemaForPrompt(schema) {
   return 'Reply with ONLY one JSON value (no prose, no code fence) that matches this JSON Schema exactly:\n' + JSON.stringify(schema);
 }
 
+// ---- src/core/topics.js
+// Drill topics. A trainer picks a preset, a Knowledge Library topic, or types their own;
+// the topic steers which source sections are used and what every ticket is about.
+
+var TOPIC_PRESETS = [
+  { label: 'Lockout tickets', keywords: ['lockout', 'lock-out', 'locked out', 'lock out', 'could not get in', 'access'] },
+  { label: 'Unused DHJ vouchers', keywords: ['unused dhj', 'dhj voucher', 'unused voucher', 'voucher'] },
+  { label: 'FCF memberships', keywords: ['fcf', 'forever clean flex', 'membership fee', 'mf'] },
+  { label: 'Legacy FC / DHJ memberships', keywords: ['legacy', 'dhj', 'forever clean', 'fc table'] },
+  { label: 'ETF waivers', keywords: ['etf', 'early termination', 'waive', 'waiver'] },
+  { label: 'Free month offers', keywords: ['free month', 'retention offer', 'retention'] },
+  { label: 'MF reductions', keywords: ['mf reduction', 'membership fee', 'reduce', 'discount'] },
+  { label: 'Voucher refunds', keywords: ['voucher refund', 'self-refund', 'refund link', 'voucher'] },
+  { label: 'Refund requests', keywords: ['refund', 'chargeback', 'dispute'] },
+  { label: 'Cancellations and retention', keywords: ['cancel', 'cancellation', 'retention', 'retain'] }
+];
+
+var TOPIC_STOPWORDS = { the: 1, and: 1, for: 1, with: 1, tickets: 1, ticket: 1, issues: 1, issue: 1, about: 1, cases: 1, case: 1 };
+
+function topicKeywords(topic) {
+  if (isBlank(topic)) return [];
+  var preset = TOPIC_PRESETS.filter(function (p) { return normalizeText(p.label) === normalizeText(topic); })[0];
+  if (preset) return preset.keywords.slice();
+  var words = normalizeText(topic).split(/[^a-z0-9-]+/).filter(function (w) { return w.length >= 3 && !TOPIC_STOPWORDS[w]; });
+  return uniq([normalizeText(topic)].concat(words));
+}
+
+// Top-level Knowledge Library topics (tab names) for the topic picker.
+function libraryTopics(sections) {
+  var counts = {};
+  (sections || []).forEach(function (s) {
+    if (s.sourceType !== 'KNOWLEDGE_LIBRARY' || !s.path) return;
+    var top = s.path.split(' > ')[0].trim();
+    if (top && top.length <= 60) counts[top] = (counts[top] || 0) + 1;
+  });
+  return Object.keys(counts).filter(function (t) { return counts[t] >= 2 && !/table of contents|welcome/i.test(t); }).sort();
+}
+
+function sectionsMatchingTopic(sections, topic) {
+  var kws = topicKeywords(topic).map(normalizeText);
+  if (!kws.length) return sections;
+  return sections.filter(function (s) {
+    var hay = normalizeText((s.path || s.heading || '') + ' ' + s.text);
+    return kws.some(function (k) { return hay.indexOf(k) !== -1; });
+  });
+}
+
+// ---- src/core/readability.js
+// Keeps generated tickets short, plain and current. Problems found here trigger one
+// automatic rewrite; anything left after that becomes a small note for the trainer.
+
+var READ_LIMITS = { ticketWords: 90, titleWords: 7, detailCount: 6, detailWords: 10, rationaleWords: 45 };
+
+var MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, sept: 8, oct: 9, nov: 10, dec: 11 };
+
+function wordCount(s) {
+  return String(s || '').trim().split(/\s+/).filter(Boolean).length;
+}
+
+// Every explicit date in the text: "Sep 24, 2026", "September 2026", "2026-09-24", "9/24/2026".
+function findDates(text) {
+  var out = [];
+  var s = String(text || '');
+  var m;
+  var re1 = /\b(jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})?,?\s*(\d{4})\b/gi;
+  while ((m = re1.exec(s))) out.push({ text: m[0], date: new Date(Date.UTC(+m[3], MONTHS[m[1].toLowerCase().slice(0, 4)] !== undefined ? MONTHS[m[1].toLowerCase().slice(0, 4)] : MONTHS[m[1].toLowerCase().slice(0, 3)], +(m[2] || 1))) });
+  var re2 = /\b(\d{4})-(\d{2})-(\d{2})\b/g;
+  while ((m = re2.exec(s))) out.push({ text: m[0], date: new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])) });
+  var re3 = /\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/g;
+  while ((m = re3.exec(s))) out.push({ text: m[0], date: new Date(Date.UTC(+m[3], +m[1] - 1, +m[2])) });
+  return out;
+}
+
+function scenarioTraineeText(out) {
+  return [out.title, out.ticket].concat((out.accountDetails || []).map(function (d) { return d.label + ': ' + d.value; })).join('\n');
+}
+
+// today: 'YYYY-MM-DD'. Dates must fall within the last 12 months or the next 2 months.
+function checkReadability(out, today) {
+  var problems = [];
+  if (wordCount(out.ticket) > READ_LIMITS.ticketWords) problems.push('Ticket is ' + wordCount(out.ticket) + ' words; keep it under ' + READ_LIMITS.ticketWords + '.');
+  if (wordCount(out.title) > READ_LIMITS.titleWords) problems.push('Title is too long; use ' + READ_LIMITS.titleWords + ' words or fewer.');
+  if ((out.accountDetails || []).length > READ_LIMITS.detailCount) problems.push('Use at most ' + READ_LIMITS.detailCount + ' account details.');
+  (out.accountDetails || []).forEach(function (d) {
+    if (wordCount(d.value) > READ_LIMITS.detailWords) problems.push('Account detail "' + d.label + '" is too long; keep each value under ' + READ_LIMITS.detailWords + ' words.');
+  });
+  if (wordCount(out.rationale) > READ_LIMITS.rationaleWords) problems.push('Rationale is too long; 2 short sentences.');
+  var now = new Date(today + 'T00:00:00Z').getTime();
+  var day = 24 * 3600 * 1000;
+  findDates(scenarioTraineeText(out)).forEach(function (d) {
+    var t = d.date.getTime();
+    if (isNaN(t)) return;
+    if (t < now - 366 * day || t > now + 62 * day) problems.push('Date "' + d.text + '" is not current; use dates within the last 12 months of ' + today + '.');
+  });
+  return problems;
+}
+
+function humanDate(today) {
+  var d = new Date(today + 'T00:00:00Z');
+  return ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getUTCMonth()] + ' ' + d.getUTCDate() + ', ' + d.getUTCFullYear();
+}
+
 // ---- src/drills/approveDeny.js
 // Drill 1 — "Approve or Deny" speed drill (daily, 5 complex membership tickets, 15 minutes).
 
@@ -648,30 +750,27 @@ var APPROVE_DENY_TYPE = {
   ],
 
   formInstructions: function (drill) {
-    return 'Approve or Deny speed drill. Target time: ' + drill.config.targetMinutes + ' minutes for all ' +
-      drill.config.scenarioCount + ' tickets.\n\n' +
-      'For each ticket, decide which retention action(s) the member qualifies for: Free month, MF reduction, ' +
-      'ETF waiver, or None of the above. Then name the exact account detail that supports your decision and ' +
-      'briefly explain it. Work from the ticket and account details only.';
+    return 'Approve or Deny \u2014 ' + drill.config.scenarioCount + ' tickets, about ' + drill.config.targetMinutes + ' minutes.\n' +
+      'For each ticket: pick the action, name the account detail that proves it, and say why in a sentence.';
   },
 
   questions: function () {
     return [
       {
         key: 'action', type: 'CHECKBOX', required: true,
-        prompt: 'What action should be taken? Select every action the member qualifies for, or "None of the above".',
+        prompt: 'What should you offer? (pick all that apply)',
         choices: APPROVE_DENY_ACTIONS.slice(),
-        scoring: { mode: 'AUTO', points: 2, method: 'EXACT_SET', gapTagOnWrong: 'INCORRECT_DECISION', criteria: 'Full credit only when the selected set exactly matches the answer key.' }
+        scoring: { mode: 'AUTO', points: 2, method: 'EXACT_SET', gapTagOnWrong: 'INCORRECT_DECISION', criteria: 'Full credit only when the picks match the answer key exactly.' }
       },
       {
         key: 'accountDetail', type: 'SHORT_TEXT', required: true,
-        prompt: 'What exact account detail supports your decision?',
-        scoring: { mode: 'MANUAL', points: 2, method: 'TRAINER', gapTagOnWrong: 'MISSING_ACCOUNT_DETAIL', criteria: 'Names the specific account fact from the answer key (not a general policy statement).' }
+        prompt: 'Which account detail tells you?',
+        scoring: { mode: 'MANUAL', points: 2, method: 'TRAINER', gapTagOnWrong: 'MISSING_ACCOUNT_DETAIL', criteria: 'Names the exact account fact, not a general policy.' }
       },
       {
         key: 'explanation', type: 'PARAGRAPH', required: true,
-        prompt: 'Briefly explain your decision.',
-        scoring: { mode: 'MANUAL', points: 1, method: 'TRAINER', gapTagOnWrong: 'WEAK_REASONING', criteria: 'Connects the account detail to the correct policy and does not rely on irrelevant facts.' }
+        prompt: 'Why? (1\u20132 sentences)',
+        scoring: { mode: 'MANUAL', points: 1, method: 'TRAINER', gapTagOnWrong: 'WEAK_REASONING', criteria: 'Links the detail to the right policy.' }
       }
     ];
   },
@@ -743,9 +842,10 @@ function commonScenarioOutputSchema() {
           properties: { sectionId: { type: 'string' }, quote: { type: 'string' }, supports: { type: 'string' } },
           required: ['sectionId', 'quote', 'supports']
         }
-      }
+      },
+      sourceConflict: { type: 'string' }
     },
-    required: ['insufficientSource', 'insufficientReason', 'title', 'ticket', 'accountDetails', 'rationale', 'commonMistakes', 'coachingNotes', 'citations']
+    required: ['insufficientSource', 'insufficientReason', 'title', 'ticket', 'accountDetails', 'rationale', 'commonMistakes', 'coachingNotes', 'citations', 'sourceConflict']
   };
 }
 
@@ -775,9 +875,8 @@ var TRIAGE_TYPE = {
   ],
 
   formInstructions: function (drill) {
-    return 'Triage-Only drill. Target time: ' + drill.config.targetMinutes + ' minutes.\n\n' +
-      'You will NOT write a customer response. For each ticket, choose the process that should be used, ' +
-      'the tag to apply, and the interactive checklist/process to launch.';
+    return 'Triage \u2014 about ' + drill.config.targetMinutes + ' minutes. Do not write a reply.\n' +
+      'For each ticket: pick the process, the tag and the checklist to launch.';
   },
 
   // ctx.catalog: approved catalog entries.
@@ -788,26 +887,26 @@ var TRIAGE_TYPE = {
     var checklists = uniq(catalog.map(function (c) { return c.checklist; }).filter(Boolean));
     var qs = [{
       key: 'process', type: 'MULTIPLE_CHOICE', required: true,
-      prompt: 'Which process should be used for this ticket?', choices: names,
+      prompt: 'Which process?', choices: names,
       scoring: { mode: 'AUTO', points: 2, method: 'EXACT', gapTagOnWrong: 'INCORRECT_PROCESS', criteria: 'Matches the documented process for this ticket.' }
     }];
     if (tags.length >= 2) {
       qs.push({
         key: 'tag', type: 'MULTIPLE_CHOICE', required: true,
-        prompt: 'Which tag should be applied?', choices: tags,
+        prompt: 'Which tag?', choices: tags,
         scoring: { mode: 'AUTO', points: 1, method: 'EXACT', gapTagOnWrong: 'INCORRECT_TAG', criteria: 'Matches the documented tag for the process.' }
       });
     }
     if (checklists.length >= 2) {
       qs.push({
         key: 'checklist', type: 'MULTIPLE_CHOICE', required: true,
-        prompt: 'Which checklist/process should be launched?', choices: checklists,
+        prompt: 'Which checklist?', choices: checklists,
         scoring: { mode: 'AUTO', points: 1, method: 'EXACT', gapTagOnWrong: 'INCORRECT_CHECKLIST', criteria: 'Matches the documented interactive checklist for the process.' }
       });
     }
     qs.push({
       key: 'reasoning', type: 'SHORT_TEXT', required: false,
-      prompt: 'Optional: which detail in the ticket told you this?',
+      prompt: 'What told you? (optional)',
       scoring: { mode: 'MANUAL', points: 0, method: 'TRAINER', gapTagOnWrong: 'WEAK_REASONING', criteria: 'Not scored; used for coaching.' }
     });
     return qs;
@@ -853,11 +952,6 @@ var TRIAGE_TYPE = {
     });
     if (!isBlank(entry.tag)) correct.tag = entry.tag;
     if (!isBlank(entry.checklist)) correct.checklist = entry.checklist;
-    var missing = [isBlank(entry.tag) ? 'tag' : null, isBlank(entry.checklist) ? 'checklist' : null].filter(Boolean);
-    if (missing.length) {
-      flags.push(makeFlag('CATALOG_GAP', 'The catalog entry "' + entry.name + '" has no documented ' + missing.join(' or ') +
-        '; ' + (missing.length > 1 ? 'those questions were' : 'that question was') + ' left out for this ticket. Add them to the catalog entry if the Library documents them.', false));
-    }
     return {
       correctAnswer: correct,
       correctDecision: entry.name + (entry.tag ? ' / tag: ' + entry.tag : '') + (entry.checklist ? ' / checklist: ' + entry.checklist : ''),
@@ -952,24 +1046,29 @@ var GAP_TAGS = [
 // llm interface: await llm.generateJson({ system, user, schema }) -> parsed object.
 
 var GENERATOR_SYSTEM_PROMPT = [
-  'You write realistic customer-service training scenarios for Homeaglow Care trainees, plus the trainer answer key.',
-  'Ground every policy statement in the <source> sections provided. They are the only approved policy. Do not use outside knowledge of how retention or refunds "usually" work.',
-  'For every claim in the answer key (the decision, the rationale, and why the required account detail matters) add a citation: the source id and a short quote copied verbatim from that source. Never paraphrase inside a quote.',
-  'If the sources do not clearly establish the correct answer for the scenario you want to write, write a different scenario that they do cover. If none is possible, set insufficientSource to true and explain what is missing in insufficientReason. Never fill a gap with a plausible-sounding policy.',
-  'The ticket must read like a real customer message (first person, natural tone). Put the facts an agent would see in their tools into accountDetails as short label/value pairs: plan, dates, payment history, visits, prior agent actions, notes.',
-  'Make the scenario hard through its facts, not through convoluted wording. Do not state the answer, hint at the policy name, or mention "the correct action" anywhere in the ticket or account details.',
-  'rationale, commonMistakes and coachingNotes are for the trainer only and should be specific to this case.'
+  'You write customer-service training tickets for Homeaglow Care trainees, plus the trainer answer key.',
+  'Use ONLY the <source> sections provided: Knowledge Library sections (official policy) and CSQ Slack messages (recent clarifications from leads). Do not use outside knowledge of how retention or refunds "usually" work.',
+  'For every claim in the answer key add a citation: the source id and a short quote copied word for word from that source. Never paraphrase inside a quote.',
+  'If the Knowledge Library and a Slack message disagree, follow the more recent clarification and describe the disagreement in sourceConflict; otherwise leave sourceConflict empty.',
+  'If the sources do not clearly give the correct answer, write a different ticket that they do cover. If none is possible, set insufficientSource to true and say what is missing in insufficientReason. Never invent a policy.',
+  'STYLE. Write like a real customer: short, plain, everyday words (easy for a new hire to read). Title: 3 to 6 words. Ticket: 2 to 4 short sentences, under 80 words. No long backstory.',
+  'Account details: 3 to 6 short label/value pairs, each value a few words (for example "Plan: FCF $19/month", "Last cleaning: Sep 22, 2026"). Include only facts an agent would check, plus at most one that does not matter.',
+  'DATES. Use current dates. Every date must be within the last 12 months of today (scheduled cleanings may be up to 2 months ahead). Write dates like "Sep 22, 2026".',
+  'Do not state the answer, name the policy, or hint at "the correct action" in the ticket or account details.',
+  'Trainer-only fields: rationale in 1 to 2 short sentences; at most 2 common mistakes, each one short line; coaching note in one sentence.'
 ].join('\n');
 
 function buildGenerationPrompt(typeDef, ctx) {
   var parts = [];
+  parts.push('Today is ' + humanDate(ctx.today) + '.');
+  if (ctx.topic) parts.push('TOPIC: every ticket in this drill must be about "' + ctx.topic + '". Use the sources about this topic.');
   parts.push(typeDef.promptGuidance(ctx));
   parts.push('Difficulty: ' + ctx.difficulty + ' — ' + (DIFFICULTY_GUIDANCE[ctx.difficulty] || ''));
   if (ctx.avoid && ctx.avoid.length) {
     parts.push('Already used in this drill (write something clearly different):\n' + ctx.avoid.map(function (t) { return '- ' + t; }).join('\n'));
   }
   if (ctx.trainerHint) parts.push('Trainer request for this scenario: ' + ctx.trainerHint);
-  parts.push('Approved sources:\n\n' + formatSectionsForPrompt(ctx.sections));
+  parts.push('Sources:\n\n' + formatSectionsForPrompt(ctx.sections));
   return { system: GENERATOR_SYSTEM_PROMPT, user: parts.join('\n\n') };
 }
 
@@ -984,6 +1083,17 @@ async function generateScenarioContent(typeDef, ctx, llm) {
   if (problems.length) {
     throw ServiceError('BAD_MODEL_OUTPUT', 'Generated scenario did not match the expected structure: ' + problems.slice(0, 5).join('; '));
   }
+  // One automatic rewrite when the ticket is too wordy or its dates are stale.
+  var style = ctx.today ? checkReadability(output, ctx.today) : [];
+  if (style.length) {
+    var retry = await llm.generateJson({
+      system: prompt.system,
+      user: prompt.user + '\n\nYour previous answer broke these rules. Fix them and keep the same answer key:\n- ' + style.join('\n- ') +
+        '\n\nPrevious answer:\n' + JSON.stringify(output),
+      schema: schema
+    });
+    if (!checkJsonAgainstSchema(retry, schema).length) output = retry;
+  }
   return output;
 }
 
@@ -997,6 +1107,11 @@ function buildScenarioParts(typeDef, ctx, output) {
     rationale: '', commonMistakes: [], coachingNotes: '', citations: []
   };
 
+  if (!isBlank(out.sourceConflict)) {
+    flags.push(makeFlag('SOURCE_CONFLICT', 'The Library and a Slack clarification disagree: ' + out.sourceConflict, false));
+  }
+  var styleLeft = output && ctx.today ? checkReadability(out, ctx.today) : [];
+  if (styleLeft.length) flags.push(makeFlag('STYLE', styleLeft.join(' '), false));
   if (out.insufficientSource) {
     flags.push(makeFlag('INSUFFICIENT_SOURCE', 'Generator reported the sources do not support an answer: ' + (out.insufficientReason || '(no reason given)'), true));
   }
@@ -1518,6 +1633,18 @@ function slackPayloadText(payload) {
   return JSON.stringify(payload);
 }
 
+// Turn parsed messages into source sections. Short chatter ("thanks!", "+1") is dropped.
+function slackSections(messages, channel) {
+  return (messages || []).filter(function (m) { return m.text && m.text.length >= 25; }).map(function (m) {
+    return {
+      sectionId: 'SL-' + hashString(channel.id + '|' + m.ts + '|' + m.text),
+      sourceType: 'CSQ_SLACK', title: '#' + channel.name,
+      heading: '#' + channel.name + ' \u00B7 ' + m.postedAt,
+      path: 'CSQ Slack #' + channel.name, url: null, postedAt: m.postedAt, text: m.text
+    };
+  });
+}
+
 // ---- src/core/drillService.js
 // Trainer-side drill workflow. Everything the dashboard does goes through here.
 //
@@ -1538,6 +1665,18 @@ function slackPayloadText(payload) {
 var AUDIT_LIMIT = 300;
 var SOURCE_CHUNK_CHARS = 150000;
 var SOURCE_PROMPT_CHARS = 60000;
+var SLACK_STALE_MS = 6 * 3600 * 1000;
+var SLACK_DAYS = 45;
+var DEFAULT_CSQ_CHANNELS = [
+  { id: 'C0BL531GV0R', name: 'csq-claude-escalations' },
+  { id: 'C0B6W0XPQE4', name: 'csq-customer-care-control' },
+  { id: 'C0ASLRNN1RA', name: 'training_cohort-3-30-csq' },
+  { id: 'C096318TMDX', name: 'rr-tone-and-voice-csq' }
+];
+
+function csqChannels(settings) {
+  return settings && settings.csqChannels && settings.csqChannels.length ? settings.csqChannels : DEFAULT_CSQ_CHANNELS;
+}
 
 function createDrillService(deps) {
   var store = deps.store;
@@ -1615,14 +1754,6 @@ function createDrillService(deps) {
     chunks.sort(function (a, b) { return a.chunkId < b.chunkId ? -1 : 1; }).forEach(function (c) {
       sections = sections.concat(c.sections || []);
     });
-    var snippets = await store.list(COLLECTIONS.snippets, ['status', 'APPROVED']);
-    snippets.forEach(function (sn) {
-      sections.push({
-        sectionId: sn.snippetId, sourceType: 'CSQ_SLACK', title: 'CSQ Slack #' + (sn.channelName || sn.channelId),
-        heading: 'CSQ Slack #' + (sn.channelName || sn.channelId) + ' — ' + (sn.postedAt || sn.ts),
-        path: 'CSQ Slack #' + (sn.channelName || sn.channelId), url: sn.permalink || null, text: sn.text
-      });
-    });
     return sections;
   }
 
@@ -1633,18 +1764,22 @@ function createDrillService(deps) {
 
   async function buildContext(drill, typeDef, opts, scenarios) {
     opts = opts || {};
-    var sections = selectSections(await getAllSections(), typeDef.sourceKeywords, SOURCE_PROMPT_CHARS);
-    var catalog = typeDef.requiresCatalog ? await approvedCatalog() : [];
-    if (typeDef.requiresCatalog && catalog.length < 2) {
-      throw ServiceError('CATALOG_REQUIRED', 'Approve at least two process catalog entries (Sources → Triage process catalog) before generating ' + typeDef.name + ' scenarios.');
+    var topic = (drill.config && drill.config.topic) || '';
+    var all = await getAllSections();
+    if (topic && all.length && !sectionsMatchingTopic(all, topic).length) {
+      throw ServiceError('NO_SOURCE_MATERIAL', 'Nothing in the Knowledge Library or CSQ Slack mentions "' + topic + '". Try a different wording for the topic.');
     }
+    var sections = selectSections(all, typeDef.sourceKeywords, SOURCE_PROMPT_CHARS, topicKeywords(topic));
+    var catalog = typeDef.requiresCatalog ? await ensureCatalog() : [];
     var active = activeScenarios(scenarios || []);
     var category = opts.category || null;
-    if (!category && typeDef.categories) {
+    if (!category && !topic && typeDef.categories) {
       category = typeDef.categories[active.length % typeDef.categories.length];
     }
     return {
       drill: drill,
+      topic: topic,
+      today: clock.today(),
       difficulty: opts.difficulty || drill.config.difficulty,
       sections: sections,
       catalog: catalog,
@@ -1684,14 +1819,16 @@ function createDrillService(deps) {
         drillId = makeDrillId(typeDef.drillIdPrefix, today, sameDay.map(function (d) { return d.drillId; }).concat([drillId]));
       }
       var count = parseInt(input.scenarioCount, 10) || typeDef.defaults.scenarioCount;
+      var topic = String(input.topic || '').trim().slice(0, 80);
       var drill = {
         drillId: drillId, drillType: typeDef.type, drillDate: today,
-        title: input.title || typeDef.name,
+        title: input.title || (topic ? typeDef.name + ' · ' + topic : typeDef.name),
         status: DrillStatus.DRAFT,
         config: {
           scenarioCount: Math.max(1, Math.min(count, 25)),
           difficulty: DIFFICULTY_GUIDANCE[input.difficulty] ? input.difficulty : typeDef.defaults.difficulty,
-          targetMinutes: parseInt(input.targetMinutes, 10) || typeDef.defaults.targetMinutes
+          targetMinutes: parseInt(input.targetMinutes, 10) || typeDef.defaults.targetMinutes,
+          topic: topic
         },
         nextScenarioSeq: 1,
         createdAt: now(), createdBy: actor, updatedAt: now(),
@@ -1708,7 +1845,7 @@ function createDrillService(deps) {
     return drills.sort(function (a, b) { return a.createdAt < b.createdAt ? 1 : -1; }).map(function (d) {
       return {
         drillId: d.drillId, drillType: d.drillType, title: d.title, status: d.status, createdAt: d.createdAt,
-        drillDate: d.drillDate, scenarioCount: d.config.scenarioCount,
+        drillDate: d.drillDate, scenarioCount: d.config.scenarioCount, topic: d.config.topic || '',
         formStatus: d.form ? d.form.state : 'NONE', formUrl: d.form && d.form.publishedUrl,
         submissions: d.responseStats ? d.responseStats.responses : 0,
         trainees: d.responseStats ? d.responseStats.trainees : 0,
@@ -2273,11 +2410,11 @@ function createDrillService(deps) {
     return buildCoachingReport(drills, answers, scores);
   }
 
-  // ---- sources, CSQ Slack, triage catalog ---------------------------------
+  // ---- sources (Knowledge Library + CSQ Slack), triage catalog -------------
 
   async function requestSourceRefresh() {
     var settings = await requireFolder();
-    return bridge.requestSourceExport(settings.bridgeFolderId, settings.sourceDocId);
+    return bridge.requestSourceExport(settings.bridgeFolderId, settings.sourceDocId, now().replace(/[^0-9A-Za-z]/g, ''));
   }
 
   async function importSources() {
@@ -2304,7 +2441,8 @@ function createDrillService(deps) {
       await store.put(COLLECTIONS.sources, id, { chunkId: id, generatedAt: exp.generatedAt, docId: exp.docId, sections: chunks[i] });
     }
     for (var j = 0; j < oldChunks.length; j++) {
-      if (parseInt(oldChunks[j].chunkId.slice(3), 10) >= chunks.length) await store.remove(COLLECTIONS.sources, oldChunks[j].chunkId);
+      var cid = oldChunks[j].chunkId || '';
+      if (cid.indexOf('kl-') === 0 && parseInt(cid.slice(3), 10) >= chunks.length) await store.remove(COLLECTIONS.sources, cid);
     }
     var s2 = await getSettings();
     s2.sourcesMeta = { generatedAt: exp.generatedAt, importedAt: now(), importedBy: actor, sections: sections.length, chunks: chunks.length, docId: exp.docId };
@@ -2312,31 +2450,78 @@ function createDrillService(deps) {
     return { status: 'OK', sections: sections.length, generatedAt: exp.generatedAt };
   }
 
-  async function fetchCsqMessages(channelId) {
-    if (!deps.slack) throw ServiceError('NOT_AVAILABLE', 'Slack is not connected for this view.');
-    return deps.slack.readChannel(channelId);
+  // Automatic source refresh: imports a newer Library export, asks the bridge for a
+  // new export when the Library doc changed, and re-pulls CSQ Slack channels that are
+  // older than SLACK_STALE_MS. Safe to call on every page load.
+  async function refreshSources(opts) {
+    opts = opts || {};
+    var settings = await getSettings();
+    var result = { library: null, slack: [] };
+    if (isBlank(settings.bridgeFolderId)) {
+      result.library = { status: 'NOT_CONFIGURED' };
+    } else {
+      try {
+        var meta = settings.sourcesMeta || null;
+        var index = bridge.getSourceIndex ? await bridge.getSourceIndex(settings.bridgeFolderId) : null;
+        if (index && (!meta || index.generatedAt > meta.generatedAt)) {
+          result.library = await importSources();
+        } else {
+          var docModified = bridge.getDocModifiedTime ? await bridge.getDocModifiedTime(settings.sourceDocId) : null;
+          var stale = !index || (docModified && docModified > index.generatedAt);
+          if (stale || opts.force) {
+            var key = (opts.force ? now() : (docModified || clock.today())).replace(/[^0-9A-Za-z]/g, '');
+            await bridge.requestSourceExport(settings.bridgeFolderId, settings.sourceDocId, key);
+            result.library = { status: 'REQUESTED' };
+          } else {
+            result.library = { status: 'CURRENT', generatedAt: index.generatedAt };
+          }
+        }
+      } catch (e) {
+        result.library = { status: 'ERROR', message: e.message || String(e) };
+      }
+    }
+    if (deps.slack) {
+      var channels = csqChannels(settings);
+      for (var i = 0; i < channels.length; i++) {
+        var ch = channels[i];
+        var existing = await store.get(COLLECTIONS.sources, 'slack-' + ch.id);
+        var age = existing ? Date.parse(now()) - Date.parse(existing.pulledAt) : Infinity;
+        if (!opts.force && age < SLACK_STALE_MS) { result.slack.push({ channel: ch.name, status: 'CURRENT', messages: existing.sections.length }); continue; }
+        try {
+          var msgs = await deps.slack.readChannel(ch.id, { days: SLACK_DAYS });
+          var sections = slackSections(msgs, ch);
+          var kept = [], size = 0;
+          for (var k = 0; k < sections.length && size < SOURCE_CHUNK_CHARS; k++) { kept.push(sections[k]); size += JSON.stringify(sections[k]).length; }
+          await store.put(COLLECTIONS.sources, 'slack-' + ch.id, { chunkId: 'slack-' + ch.id, kind: 'SLACK', channelId: ch.id, channelName: ch.name, pulledAt: now(), sections: kept });
+          result.slack.push({ channel: ch.name, status: 'PULLED', messages: kept.length });
+        } catch (e) {
+          result.slack.push({ channel: ch.name, status: 'ERROR', message: e.message || String(e) });
+        }
+      }
+    }
+    return result;
   }
 
-  async function approveSnippet(snippet) {
-    if (isBlank(snippet.text)) throw ServiceError('EMPTY', 'Snippet text is empty.');
-    var id = 'csq-' + hashString(snippet.channelId + '|' + snippet.ts + '|' + snippet.text);
-    var doc = {
-      snippetId: id, channelId: snippet.channelId, channelName: snippet.channelName || '', ts: snippet.ts || '',
-      postedAt: snippet.postedAt || '', author: snippet.author || '', permalink: snippet.permalink || '',
-      text: String(snippet.text), status: 'APPROVED', approvedBy: actor, approvedAt: now()
-    };
-    await store.put(COLLECTIONS.snippets, id, doc);
-    return doc;
+  async function sourceSummary() {
+    var settings = await getSettings();
+    var chunks = await store.list(COLLECTIONS.sources);
+    var slack = chunks.filter(function (c) { return c.kind === 'SLACK'; }).map(function (c) {
+      return { channelId: c.channelId, channel: c.channelName, messages: (c.sections || []).length, pulledAt: c.pulledAt };
+    });
+    return { library: settings.sourcesMeta || null, slack: slack, channels: csqChannels(settings) };
   }
 
-  async function setSnippetStatus(snippetId, status) {
-    var doc = await store.get(COLLECTIONS.snippets, snippetId);
-    if (!doc) throw ServiceError('NOT_FOUND', 'Snippet not found.');
-    doc.status = status === 'APPROVED' ? 'APPROVED' : 'REJECTED';
-    doc.statusBy = actor;
-    doc.statusAt = now();
-    await store.put(COLLECTIONS.snippets, snippetId, doc);
-    return doc;
+  // Triage answer choices come from documented processes. Entries backed by a quote that
+  // is really in the sources are used automatically; unbacked ones are dropped.
+  async function ensureCatalog() {
+    var approved = await approvedCatalog();
+    if (approved.length >= 2) return approved;
+    await proposeCatalog();
+    approved = await approvedCatalog();
+    if (approved.length < 2) {
+      throw ServiceError('CATALOG_REQUIRED', 'Could not find at least two documented triage processes in the sources. Refresh sources and try again.');
+    }
+    return approved;
   }
 
   async function proposeCatalog() {
@@ -2348,7 +2533,10 @@ function createDrillService(deps) {
       var id = 'PROC-' + hashString(normalizeText(e.name)).slice(0, 6).toUpperCase();
       var existing = await store.get(COLLECTIONS.catalog, id);
       if (existing && existing.status === 'APPROVED') continue;
-      var doc = Object.assign({ catalogId: id, status: 'PROPOSED', proposedAt: now(), proposedBy: actor }, e);
+      var verified = (e.sources || []).some(function (x) { return x.verified; });
+      var doc = Object.assign({ catalogId: id, proposedAt: now(), proposedBy: actor }, e, {
+        status: verified ? 'APPROVED' : 'REJECTED', approvedBy: verified ? 'auto (verified quote)' : null
+      });
       await store.put(COLLECTIONS.catalog, id, doc);
       saved.push(doc);
     }
@@ -2401,10 +2589,9 @@ function createDrillService(deps) {
     syncResponses: syncResponses, scoreAnswer: scoreAnswer, acceptAutoScores: acceptAutoScores,
     completeDrill: completeDrill, reopenReview: reopenReview, coachingReport: coachingReport,
     requestSourceRefresh: requestSourceRefresh, importSources: importSources, getAllSections: getAllSections,
-    fetchCsqMessages: fetchCsqMessages, approveSnippet: approveSnippet, setSnippetStatus: setSnippetStatus,
+    refreshSources: refreshSources, sourceSummary: sourceSummary,
     proposeCatalog: proposeCatalog, updateCatalogEntry: updateCatalogEntry,
-    listCatalog: function () { return store.list(COLLECTIONS.catalog); },
-    listSnippets: function () { return store.list(COLLECTIONS.snippets); }
+    listCatalog: function () { return store.list(COLLECTIONS.catalog); }
   };
 }
 
@@ -2523,9 +2710,17 @@ function makeDriveBridge(mcp) {
     },
     getFormResult: function (folderId, drillId) { return readJson(folderId, 'drillform-result__' + drillId + '.json'); },
     getResponses: function (folderId, drillId) { return readJson(folderId, 'drillform-responses__' + drillId + '.json'); },
-    async requestSourceExport(folderId, docId) {
-      await writeNew(folderId, 'drill-sources-request__' + Date.now() + '.json', { kind: 'SOURCE_REQUEST', docId: docId, requestedAt: new Date().toISOString() });
+    // One request per key (the doc's last-edit time, or "now" for a manual refresh).
+    async requestSourceExport(folderId, docId, key) {
+      var title = 'drill-sources-request__' + (key || Date.now()) + '.json';
+      if (await findFile(folderId, title)) return { requested: true, reused: true };
+      await writeNew(folderId, title, { kind: 'SOURCE_REQUEST', docId: docId, requestedAt: new Date().toISOString() });
       return { requested: true };
+    },
+    getSourceIndex: function (folderId) { return readJson(folderId, 'drill-sources__index.json'); },
+    async getDocModifiedTime(docId) {
+      var res = await mcp.callTool(DRIVE, 'get_file_metadata', { fileId: docId, excludeContentSnippets: true }, { cache: false });
+      return (res.payload && res.payload.modifiedTime) || null;
     },
     getBridgeStatus: function (folderId) { return readJson(folderId, 'drill-bridge__status.json'); },
     async getSourceExport(folderId) {
@@ -2544,9 +2739,22 @@ function makeDriveBridge(mcp) {
 
 function makeSlackReader(mcp) {
   return {
-    async readChannel(channelId) {
-      var res = await mcp.callTool(SLACK, 'slack_read_channel', { channel_id: channelId, limit: 100, response_format: 'detailed' }, { cache: false });
-      return parseSlackChannelText(slackPayloadText(res.payload), channelId);
+    // Up to 3 pages (300 messages) from the last `days` days.
+    async readChannel(channelId, opts) {
+      var days = (opts && opts.days) || 45;
+      var oldest = String(Math.floor(Date.now() / 1000 - days * 86400));
+      var cursor = null, messages = [];
+      for (var page = 0; page < 3; page++) {
+        var input = { channel_id: channelId, limit: 100, oldest: oldest, response_format: 'detailed' };
+        if (cursor) input.cursor = cursor;
+        var res = await mcp.callTool(SLACK, 'slack_read_channel', input, { cache: false });
+        messages = messages.concat(parseSlackChannelText(slackPayloadText(res.payload), channelId));
+        var info = res.payload && res.payload.pagination_info;
+        var m = /cursor:\s*`([^`]+)`/.exec(String(info || ''));
+        if (!m) break;
+        cursor = m[1];
+      }
+      return messages;
     },
     async searchChannels(term) {
       var res = await mcp.callTool(SLACK, 'slack_search_channels', { keywords: [term], natural_language_query: term + ' channels', response_format: 'concise', limit: 20 }, { cache: false });
@@ -2589,8 +2797,7 @@ function errorText(e) {
 var S = {
   view: 'today', drillId: null, tab: 'scenarios',
   drills: [], bundle: null, settings: null, report: null, reportType: '',
-  catalog: [], snippets: [], sections: null, sourceFilter: '',
-  csq: { channelId: '', channelName: '', messages: [], search: [] },
+  catalog: [], sections: null, sourceFilter: '', sourceSummary: null, sourceRun: null,
   editing: {}, confirmRemove: null, respTrainee: '',
   busy: null, error: null, ready: false, fatal: null,
   caps: { db: false, sample: false, mcp: false, user: false }, canWrite: null, actor: 'unknown', names: {}
@@ -2717,12 +2924,7 @@ function go(view) {
   render();
   if (view === 'drills' || view === 'today') act('Loading drills', loadDrills);
   if (view === 'coaching') act('Building the coaching report', async function () { S.report = await svc.coachingReport({ drillType: S.reportType || undefined }); });
-  if (view === 'sources') act('Loading sources', async function () {
-    S.sections = await svc.getAllSections();
-    S.catalog = await svc.listCatalog();
-    S.snippets = await svc.listSnippets();
-    await loadSettings();
-  });
+  if (view === 'sources') act('Loading sources', loadSources);
   if (view === 'settings') act('Loading settings', loadSettings);
 }
 
@@ -2753,11 +2955,34 @@ function render() {
 
 function setupIssues() {
   var issues = [];
-  if (!S.caps.sample) issues.push('Claude is not available on this view, so scenarios must be written manually.');
-  if (!S.caps.mcp) issues.push('Connectors are not available on this view. Google Forms and source imports need the Google Drive connector.');
-  if (S.settings && isBlank(S.settings.bridgeFolderId)) issues.push('Form Bridge folder is not set. Open Settings and follow the bridge setup steps.');
-  if (S.settings && !S.settings.sourcesMeta) issues.push('Knowledge Library sections have not been imported yet. Open Sources and import them.');
+  if (!S.caps.sample) issues.push('Claude is off on this view, so tickets must be written by hand.');
+  if (!S.caps.mcp) issues.push('Connectors are off on this view. Google Forms and sources need the Google Drive connector.');
+  if (S.settings && isBlank(S.settings.bridgeFolderId)) issues.push('Add the Form Bridge folder ID in Settings.');
   return issues;
+}
+
+async function loadSources() {
+  S.sections = await svc.getAllSections();
+  S.catalog = await svc.listCatalog();
+  S.sourceSummary = await svc.sourceSummary();
+  await loadSettings();
+}
+
+// Runs on every page load: imports a newer Library export and re-pulls CSQ Slack.
+// When the bridge was asked for a new export, checks again after its next run.
+async function autoRefreshSources(force) {
+  try {
+    S.sourceRun = await svc.refreshSources({ force: !!force });
+    S.sourceSummary = await svc.sourceSummary();
+    await loadSettings();
+    S.sections = await svc.getAllSections();
+    if (S.sourceRun.library && S.sourceRun.library.status === 'REQUESTED' && !autoRefreshSources._timer) {
+      autoRefreshSources._timer = setTimeout(function () { autoRefreshSources._timer = null; autoRefreshSources(false); }, 6 * 60 * 1000);
+    }
+  } catch (e) {
+    S.sourceRun = { library: { status: 'ERROR', message: errorText(e) }, slack: [] };
+  }
+  if (!S.busy) render();
 }
 
 function viewToday() {
@@ -2769,7 +2994,7 @@ function viewToday() {
     issues.length ? h('section', { class: 'panel' }, h('h2', null, 'Finish setup'), h('ul', null, issues.map(function (i) { return h('li', null, i); }))) : null,
     h('section', { class: 'panel' },
       h('div', { class: 'row spread' }, h('h2', null, 'Today’s Approve or Deny drill'), h('span', { class: 'muted mono' }, t)),
-      h('p', { class: 'muted' }, ad.defaults.scenarioCount + ' complex membership tickets, ' + ad.defaults.targetMinutes + '-minute target. Generate, review, approve, then create the Google Form and share its link with trainees.'),
+      h('p', { class: 'muted' }, ad.defaults.scenarioCount + ' tickets \u00B7 ' + ad.defaults.targetMinutes + ' minutes \u00B7 mixed topics'),
       todays.length
         ? h('div', { class: 'stack' }, todays.map(function (d) {
             return h('div', { class: 'row spread panel flat' },
@@ -2789,28 +3014,53 @@ async function startToday() {
   if (S.caps.sample) generateAll(d.drillId);
 }
 
+function topicOptions() {
+  var lib = libraryTopics(S.sections || []);
+  var presetLabels = TOPIC_PRESETS.map(function (p) { return p.label; });
+  return { presets: presetLabels, library: lib.filter(function (t) { return presetLabels.indexOf(t) === -1; }) };
+}
+
+function chosenTopic() {
+  var v = val('nd-topic');
+  if (v === '__other') return val('nd-topic-other').trim();
+  return v;
+}
+
 function viewNewDrill() {
   var types = listDrillTypeSummaries();
+  var opts = topicOptions();
   var sel = h('select', { id: 'nd-type', onchange: function () {
     var t = types.filter(function (x) { return x.type === val('nd-type'); })[0];
     document.getElementById('nd-count').value = t.defaults.scenarioCount;
     document.getElementById('nd-min').value = t.defaults.targetMinutes;
     document.getElementById('nd-diff').value = t.defaults.difficulty;
   } }, types.map(function (t) { return h('option', { value: t.type }, t.name); }));
+  var topic = h('select', { id: 'nd-topic', onchange: function () {
+    var other = document.getElementById('nd-topic-other-wrap');
+    other.hidden = val('nd-topic') !== '__other';
+    if (!other.hidden) document.getElementById('nd-topic-other').focus();
+  } },
+    h('option', { value: '' }, 'Mixed (any topic)'),
+    h('optgroup', { label: 'Common topics' }, opts.presets.map(function (t) { return h('option', { value: t }, t); })),
+    opts.library.length ? h('optgroup', { label: 'From the Knowledge Library' }, opts.library.map(function (t) { return h('option', { value: t }, t); })) : null,
+    h('option', { value: '__other' }, 'Other (type your own)\u2026'));
   return h('section', { class: 'panel' },
     h('h2', null, 'New drill'),
     h('div', { class: 'fields' },
       field('Drill type', sel),
-      field('Scenarios', h('input', { id: 'nd-count', type: 'number', min: '1', max: '25', value: String(types[0].defaults.scenarioCount) })),
+      field('Topic', topic),
+      h('label', { class: 'field', id: 'nd-topic-other-wrap', hidden: true }, h('span', { class: 'label' }, 'Your topic'), h('input', { id: 'nd-topic-other', placeholder: 'e.g. Pause requests' })),
+      field('Tickets', h('input', { id: 'nd-count', type: 'number', min: '1', max: '25', value: String(types[0].defaults.scenarioCount) })),
       field('Difficulty', h('select', { id: 'nd-diff' }, ['EASY', 'MEDIUM', 'HARD'].map(function (d) { return h('option', { value: d, selected: d === types[0].defaults.difficulty }, d.charAt(0) + d.slice(1).toLowerCase()); }))),
-      field('Target minutes', h('input', { id: 'nd-min', type: 'number', min: '1', value: String(types[0].defaults.targetMinutes) })),
-      field('Title (optional)', h('input', { id: 'nd-title', placeholder: 'Shown as the form title' }))
+      field('Minutes', h('input', { id: 'nd-min', type: 'number', min: '1', value: String(types[0].defaults.targetMinutes) }))
     ),
-    h('div', { class: 'row' }, btn('Create drill', async function () {
-      var d = await act('Creating drill', function () {
-        return svc.createDrill({ drillType: val('nd-type'), scenarioCount: val('nd-count'), difficulty: val('nd-diff'), targetMinutes: val('nd-min'), title: val('nd-title') || undefined });
-      });
-      if (d) openDrill(d.drillId);
+    h('div', { class: 'row' }, btn('Create and generate', async function () {
+      var input = { drillType: val('nd-type'), topic: chosenTopic(), scenarioCount: val('nd-count'), difficulty: val('nd-diff'), targetMinutes: val('nd-min') };
+      if (val('nd-topic') === '__other' && !input.topic) { S.error = 'Type a topic, or pick one from the list.'; render(); return; }
+      var d = await act('Creating drill', function () { return svc.createDrill(input); });
+      if (!d) return;
+      await openDrill(d.drillId);
+      if (S.caps.sample) generateAll(d.drillId);
     }, { primary: true }))
   );
 }
@@ -2824,11 +3074,12 @@ function viewDrills() {
   return h('section', { class: 'panel' },
     h('h2', null, 'Drills'),
     h('div', { class: 'table-wrap' }, h('table', null,
-      h('thead', null, h('tr', null, ['Drill ID', 'Type', 'Created', 'Scenarios', 'Google Form', 'Submissions', 'Status'].map(function (c) { return h('th', null, c); }))),
+      h('thead', null, h('tr', null, ['Drill ID', 'Type', 'Topic', 'Created', 'Tickets', 'Google Form', 'Submissions', 'Status'].map(function (c) { return h('th', null, c); }))),
       h('tbody', null, S.drills.map(function (d) {
         return h('tr', { class: 'click', tabindex: '0', onclick: function () { openDrill(d.drillId); }, onkeydown: function (e) { if (e.key === 'Enter') openDrill(d.drillId); } },
           h('td', { class: 'mono' }, d.drillId),
           h('td', null, getDrillType(d.drillType).name),
+          h('td', null, d.topic || h('span', { class: 'muted' }, 'Mixed')),
           h('td', null, fmtDate(d.createdAt)),
           h('td', null, String(d.scenarioCount)),
           h('td', null, d.formStatus === 'NONE' ? h('span', { class: 'muted' }, 'Not created') : pill(d.formStatus === 'CREATED' ? 'Created' : 'Requested', d.formStatus === 'CREATED' ? 'accent' : 'warn')),
@@ -2877,7 +3128,7 @@ function viewDrill() {
         h('div', { class: 'stack', style: 'gap:4px' },
           h('span', { class: 'mono muted' }, d.drillId),
           h('h2', null, d.title),
-          h('span', { class: 'muted small' }, typeDef.name + ' · ' + d.config.scenarioCount + ' scenarios · ' + d.config.targetMinutes + ' min · ' + d.config.difficulty.toLowerCase() + ' · created ' + fmtDate(d.createdAt) + ' by ' + who(d.createdBy))),
+          h('span', { class: 'muted small' }, [typeDef.name, d.config.topic || 'Mixed topics', d.config.scenarioCount + ' tickets', d.config.targetMinutes + ' min', d.config.difficulty.toLowerCase()].join(' \u00B7 '))),
         statusPill(d.status)),
       h('div', { class: 'stepper', 'aria-label': 'Drill lifecycle' }, STEPS.map(function (s, i) {
         return h('span', { class: i < idx ? 'done' : i === idx ? 'now' : '' }, STEP_LABEL[s]);
@@ -2948,22 +3199,22 @@ function traineeView(s) {
 function tabScenarios(b, typeDef) {
   var list = activeScenarios(b.scenarios);
   if (!list.length) {
-    return h('section', { class: 'panel empty' }, h('h2', null, 'No scenarios yet'), h('p', null, 'Generate them from the approved sources, or write one manually. Nothing is final until you approve the drill.'));
+    return h('section', { class: 'panel empty' }, h('h2', null, 'No tickets yet'), h('p', null, 'Generate them, or write one by hand. Nothing goes to trainees until you approve.'));
   }
   var editable = isTraineeContentEditable(b.drill.status);
   return h('div', { class: 'stack' }, list.map(function (s) {
     var open = S.editing[s.scenarioId];
     var hintId = 'hint-' + s.scenarioId;
     return h('section', { class: 'panel' },
-      h('div', { class: 'scenario-head' }, h('span', { class: 'mono' }, s.scenarioId), pill('v' + s.version), pill(s.difficulty.toLowerCase()), s.category ? pill(s.category) : null, pill(s.generatedBy === 'MANUAL' ? 'written by trainer' : 'generated')),
+      h('div', { class: 'scenario-head' }, h('span', { class: 'mono' }, s.scenarioId), pill(s.difficulty.toLowerCase()), s.category ? pill(s.category) : null, s.generatedBy === 'MANUAL' ? pill('written by trainer') : null),
       (s.reviewFlags || []).length ? h('div', { class: 'stack', style: 'gap:6px' }, s.reviewFlags.map(function (f) { return flagView(b, s, f); })) : null,
       open ? scenarioEditor(b, s, editable) : h('div', { class: 'grid2' },
         h('div', { class: 'stack' }, h('span', { class: 'label' }, 'Trainee sees'), traineeView(s)),
-        h('div', { class: 'stack panel flat' }, h('span', { class: 'label' }, 'Answer key (trainers only)'),
-          h('p', null, h('strong', null, s.trainer.correctDecision || '—')),
-          h('p', { class: 'small' }, h('span', { class: 'muted' }, 'Deciding detail: '), s.trainer.requiredAccountDetail || '—'),
-          h('p', { class: 'small' }, s.trainer.rationale || ''),
-          sourceList(s.trainer.sources))),
+        h('div', { class: 'stack panel flat' }, h('span', { class: 'label' }, 'Answer (trainers only)'),
+          h('p', null, h('strong', null, s.trainer.correctDecision || '\u2014')),
+          h('p', { class: 'small' }, h('span', { class: 'muted' }, 'Key detail: '), s.trainer.requiredAccountDetail || '\u2014'),
+          h('details', { class: 'small' }, h('summary', null, 'Why and sources'),
+            h('p', { style: 'margin-block:6px' }, s.trainer.rationale || ''), sourceList(s.trainer.sources)))),
       open ? null : h('div', { class: 'row' },
         btn(editable ? 'Edit' : 'Edit answer key', function () { S.editing[s.scenarioId] = true; render(); }),
         editable ? h('input', { id: hintId, placeholder: 'Optional hint for regeneration', style: 'flex:1;min-width:200px' }) : null,
@@ -3248,101 +3499,56 @@ function viewCoaching() {
 
 // ---------------------------------------------------------------- Sources
 
+function libraryStatusText(meta, run) {
+  var st = run && run.library ? run.library.status : null;
+  if (st === 'ERROR') return { kind: 'bad', text: 'Could not refresh: ' + run.library.message };
+  if (st === 'NOT_CONFIGURED') return { kind: 'warn', text: 'Add the Form Bridge folder ID in Settings.' };
+  if (!meta) return { kind: 'warn', text: st === 'REQUESTED' ? 'Export requested. It loads automatically within about 5 minutes.' : 'Checking\u2026' };
+  return { kind: 'ok', text: meta.sections + ' sections \u00B7 updated ' + fmtDate(meta.generatedAt) + (st === 'REQUESTED' ? ' \u00B7 the doc changed, a newer copy is on its way' : '') };
+}
+
 function viewSources() {
-  var meta = S.settings && S.settings.sourcesMeta;
+  var sum = S.sourceSummary || { library: S.settings && S.settings.sourcesMeta, slack: [], channels: [] };
+  var lib = libraryStatusText(sum.library, S.sourceRun);
   var sections = S.sections || [];
   var f = normalizeText(S.sourceFilter);
   var matches = f ? sections.filter(function (s) { return normalizeText(s.path + ' ' + s.text).indexOf(f) !== -1; }) : sections;
-  var channels = (S.settings && S.settings.csqChannels) || [];
+  var runErrors = {};
+  ((S.sourceRun && S.sourceRun.slack) || []).forEach(function (r) { if (r.status === 'ERROR') runErrors[r.channel] = r.message; });
   return h('div', { class: 'stack' },
     h('section', { class: 'panel' },
-      h('h2', null, 'Care Knowledge Library'),
-      h('p', { class: 'muted' }, 'Scenarios and answer keys are generated only from these sections and approved CSQ snippets. Every cited quote is checked against them.'),
-      meta ? h('p', { class: 'small' }, meta.sections + ' sections from the export of ' + fmtDate(meta.generatedAt) + ', imported ' + fmtDate(meta.importedAt) + ' by ' + who(meta.importedBy) + '.') : h('div', { class: 'notice warn' }, 'Not imported yet.'),
-      h('div', { class: 'row' },
-        btn('Ask the bridge for a fresh export', function () { act('Writing the export request', function () { return svc.requestSourceRefresh(); }, 'Requested. The bridge exports within about 5 minutes; then import it.'); }),
-        btn('Import latest export', function () { act('Importing source sections', async function () { var r = await svc.importSources(); await loadSettings(); S.sections = await svc.getAllSections(); return r; }, function (r) {
-          if (!r) return '';
-          if (r.status === 'OK') return r.sections + ' sections imported';
-          S.error = noExportReason(r.bridge);
-          return '';
-        }); }, { primary: true })),
-      sections.length ? h('div', { class: 'stack' },
-        h('input', { id: 'src-filter', placeholder: 'Search sections (e.g. ETF, free month, lock-out)', value: S.sourceFilter, onchange: function () { S.sourceFilter = val('src-filter'); render(); } }),
-        h('p', { class: 'small muted' }, matches.length + ' of ' + sections.length + ' sections' + (matches.length > 40 ? ', showing 40' : '')),
-        matches.slice(0, 40).map(function (s) {
-          return h('details', { class: 'source-row' }, h('summary', null, pill(s.sourceType === 'CSQ_SLACK' ? 'CSQ Slack' : 'Library'), ' ', s.path || s.heading, ' ', h('span', { class: 'mono muted' }, s.sectionId)),
-            h('p', { class: 'small', style: 'white-space:pre-wrap;margin-top:6px' }, s.text.slice(0, 3000)), s.url ? h('a', { href: s.url, target: '_blank', rel: 'noopener', class: 'small' }, 'Open in Google Docs') : null);
-        })) : null),
-    h('section', { class: 'panel' },
-      h('h2', null, 'CSQ Slack snippets'),
-      h('p', { class: 'muted' }, 'Load recent messages from a CSQ channel and approve the ones that state current guidance. Only approved snippets are used as sources.'),
-      h('div', { class: 'row' },
-        h('select', { id: 'csq-ch', style: 'max-width:280px', onchange: function () { S.csq.channelId = val('csq-ch'); var c = channels.filter(function (x) { return x.id === S.csq.channelId; })[0]; S.csq.channelName = c ? c.name : ''; } },
-          h('option', { value: '' }, channels.length ? 'Choose a channel' : 'Add CSQ channels in Settings'),
-          channels.map(function (c) { return h('option', { value: c.id, selected: S.csq.channelId === c.id }, '#' + c.name); })),
-        btn('Load recent messages', function () {
-          if (!S.csq.channelId) { S.error = 'Choose a channel first.'; render(); return; }
-          act('Reading #' + (S.csq.channelName || S.csq.channelId), async function () { S.csq.messages = await svc.fetchCsqMessages(S.csq.channelId); });
-        }, { disabled: !S.caps.mcp, write: false })),
-      S.csq.messages.length ? h('div', { class: 'stack' }, S.csq.messages.map(function (m) {
-        return h('div', { class: 'panel flat' }, h('div', { class: 'row small muted' }, h('span', null, m.author || 'Unknown'), h('span', null, m.postedAt)),
-          h('p', { style: 'white-space:pre-wrap' }, m.text),
-          h('div', { class: 'row' }, btn('Approve as source', function () {
-            act('Approving snippet', async function () { await svc.approveSnippet(Object.assign({ channelName: S.csq.channelName }, m)); S.snippets = await svc.listSnippets(); S.sections = await svc.getAllSections(); }, 'Snippet approved');
-          })));
+      h('div', { class: 'row spread' }, h('h2', null, 'Sources'),
+        btn('Refresh now', function () { act('Refreshing sources', function () { return autoRefreshSources(true); }, 'Sources refreshed'); })),
+      h('p', { class: 'muted small' }, 'Updated automatically each time the dashboard opens. Tickets use only these sources.'),
+      h('div', { class: 'stack', style: 'gap:6px' },
+        h('div', { class: 'row' }, pill('Knowledge Library', lib.kind), h('span', { class: 'small' }, lib.text)),
+        sum.channels.map(function (ch) {
+          var pulled = sum.slack.filter(function (x) { return x.channelId === ch.id; })[0];
+          var err = runErrors[ch.name];
+          return h('div', { class: 'row' }, pill('#' + ch.name, err ? 'bad' : pulled ? 'ok' : 'warn'),
+            h('span', { class: 'small' }, err ? 'Could not read: ' + err : pulled ? pulled.messages + ' messages from the last 45 days \u00B7 ' + fmtDate(pulled.pulledAt) : 'Not pulled yet'));
+        }))),
+    sections.length ? h('section', { class: 'panel' },
+      h('input', { id: 'src-filter', placeholder: 'Search (e.g. ETF, free month, lockout)', value: S.sourceFilter, onchange: function () { S.sourceFilter = val('src-filter'); render(); } }),
+      h('p', { class: 'small muted' }, matches.length + ' of ' + sections.length + (matches.length > 40 ? ' \u00B7 showing 40' : '')),
+      matches.slice(0, 40).map(function (s) {
+        return h('details', { class: 'source-row' }, h('summary', null, pill(s.sourceType === 'CSQ_SLACK' ? 'Slack' : 'Library'), ' ', s.sourceType === 'CSQ_SLACK' ? s.heading : (s.path || s.heading)),
+          h('p', { class: 'small', style: 'white-space:pre-wrap;margin-top:6px' }, s.text.slice(0, 3000)), s.url ? h('a', { href: s.url, target: '_blank', rel: 'noopener', class: 'small' }, 'Open in Google Docs') : null);
       })) : null,
-      h('h3', null, 'Approved snippets'),
-      S.snippets.filter(function (x) { return x.status === 'APPROVED'; }).length ? S.snippets.filter(function (x) { return x.status === 'APPROVED'; }).map(function (sn) {
-        return h('div', { class: 'row spread panel flat' }, h('div', { style: 'min-width:0;flex:1' }, h('span', { class: 'small muted' }, '#' + (sn.channelName || sn.channelId) + ' · ' + (sn.author || '') + ' · ' + sn.postedAt), h('p', { class: 'small', style: 'white-space:pre-wrap' }, sn.text)),
-          btn('Withdraw', function () { act('Withdrawing snippet', async function () { await svc.setSnippetStatus(sn.snippetId, 'REJECTED'); S.snippets = await svc.listSnippets(); S.sections = await svc.getAllSections(); }); }, { danger: true }));
-      }) : h('p', { class: 'muted small' }, 'None approved yet.')),
     viewCatalog());
 }
 
-// Explains a missing source export from the bridge's own status file.
-function noExportReason(status) {
-  if (!status) {
-    return 'No export yet, and the Form Bridge has never reported a run. Update the bridge to the latest Code.js and appsscript.json, run runBridge once from the Apps Script editor (accept the new permissions), and check that a runBridge trigger exists under Triggers.';
-  }
-  var ran = fmtDate(status.finishedAt || status.startedAt);
-  if (status.steps && /^error/.test(status.steps.sources || '')) {
-    return 'The Form Bridge failed to export the Knowledge Library on its last run (' + ran + '): ' + status.steps.sources.replace(/^error: /, '');
-  }
-  return 'No export yet. The Form Bridge last ran ' + ran + '. If you just asked for an export, wait for its next run (every 5 minutes) and import again.';
-}
-
 function viewCatalog() {
-  var entries = S.catalog.slice().sort(function (a, b) { return a.status === b.status ? (a.name < b.name ? -1 : 1) : (a.status === 'APPROVED' ? -1 : 1); });
+  var entries = S.catalog.filter(function (e) { return e.status === 'APPROVED'; }).sort(function (a, b) { return a.name < b.name ? -1 : 1; });
   return h('section', { class: 'panel' },
-    h('h2', null, 'Triage process catalog'),
-    h('p', { class: 'muted' }, 'The answer choices for Triage-Only drills (process, tag, checklist) come only from approved entries here. Propose entries from the sources, check each against the Library, then approve.'),
-    h('div', { class: 'row' }, btn('Propose entries from sources', function () { act('Reading sources for documented processes', async function () { await svc.proposeCatalog(); S.catalog = await svc.listCatalog(); }); }, { disabled: !S.caps.sample })),
-    entries.length ? entries.map(function (e) {
-      var id = 'cat-' + e.catalogId;
-      return h('div', { class: 'panel flat' },
-        h('div', { class: 'row' }, h('span', { class: 'mono' }, e.catalogId), pill(e.status.toLowerCase(), e.status === 'APPROVED' ? 'ok' : e.status === 'REJECTED' ? 'bad' : 'warn')),
-        h('div', { class: 'fields' },
-          field('Process', h('input', { id: id + '-name', value: e.name })),
-          field('Tag', h('input', { id: id + '-tag', value: e.tag || '', placeholder: 'Not documented' })),
-          field('Checklist / process to launch', h('input', { id: id + '-check', value: e.checklist || '', placeholder: 'Not documented' })),
-          field('Category', h('select', { id: id + '-cat' }, TRIAGE_CATEGORIES.map(function (c) { return h('option', { value: c, selected: e.category === c }, c); })))),
-        field('When to use', h('input', { id: id + '-when', value: e.whenToUse || '' })),
-        sourceList(e.sources),
-        h('div', { class: 'row' },
-          h('input', { id: id + '-note', placeholder: 'Approval note (required when no quote was verified)', style: 'flex:1;min-width:220px' }),
-          btn('Save', function () { saveCatalog(e, null); }),
-          e.status !== 'APPROVED' ? btn('Approve', function () { saveCatalog(e, 'APPROVED'); }, { primary: true }) : null,
-          e.status !== 'REJECTED' ? btn('Reject', function () { saveCatalog(e, 'REJECTED'); }, { danger: true }) : null));
-    }) : h('p', { class: 'muted small' }, 'No entries yet.'));
-}
-
-function saveCatalog(e, status) {
-  var id = 'cat-' + e.catalogId;
-  act('Saving catalog entry', async function () {
-    await svc.updateCatalogEntry(e.catalogId, { name: val(id + '-name'), tag: val(id + '-tag'), checklist: val(id + '-check'), category: val(id + '-cat'), whenToUse: val(id + '-when'), status: status || undefined, note: val(id + '-note') });
-    S.catalog = await svc.listCatalog();
-  }, status ? 'Entry ' + status.toLowerCase() : 'Saved');
+    h('div', { class: 'row spread' }, h('h2', null, 'Triage processes'),
+      btn('Rebuild from sources', function () { act('Finding documented processes', async function () { await svc.proposeCatalog(); S.catalog = await svc.listCatalog(); }); }, { disabled: !S.caps.sample })),
+    h('p', { class: 'muted small' }, 'Answer choices for Triage drills. Built automatically from processes the sources spell out.'),
+    entries.length ? h('div', { class: 'table-wrap' }, h('table', null,
+      h('thead', null, h('tr', null, h('th', null, 'Process'), h('th', null, 'Tag'), h('th', null, 'Checklist'))),
+      h('tbody', null, entries.map(function (e) {
+        return h('tr', null, h('td', null, e.name), h('td', null, e.tag || h('span', { class: 'muted' }, '\u2014')), h('td', null, e.checklist || h('span', { class: 'muted' }, '\u2014')));
+      })))) : h('p', { class: 'muted small' }, 'Built the first time you create a Triage drill.'));
 }
 
 // ---------------------------------------------------------------- Settings
@@ -3356,7 +3562,7 @@ function viewSettings() {
         field('Form Bridge Drive folder ID', h('input', { id: 'set-folder', value: s.bridgeFolderId || '', placeholder: 'Logged by setupBridge()' })),
         field('Knowledge Library Google Doc ID', h('input', { id: 'set-doc', value: s.sourceDocId || '' }))),
       h('label', { class: 'check' }, h('input', { type: 'checkbox', id: 'set-email', checked: s.collectVerifiedEmail !== false }), 'Require Google sign-in and collect verified trainee emails (recommended)'),
-      field('CSQ Slack channels (one per line: "C0123ABC channel-name")', h('textarea', { id: 'set-csq' }, (s.csqChannels || []).map(function (c) { return c.id + ' ' + c.name; }).join('\n'))),
+      field('Slack channels used as sources (one per line: "C0123ABC channel-name")', h('textarea', { id: 'set-csq' }, (s.csqChannels && s.csqChannels.length ? s.csqChannels : DEFAULT_CSQ_CHANNELS).map(function (c) { return c.id + ' ' + c.name; }).join('\n'))),
       h('div', { class: 'row' }, btn('Save settings', function () {
         act('Saving settings', async function () {
           S.settings = await svc.saveSettings({
@@ -3373,7 +3579,7 @@ function viewSettings() {
         h('li', null, 'Paste the contents of src/bridge/Code.js and src/bridge/appsscript.json from the Generator repository.'),
         h('li', null, 'Run setupBridge once and accept the permissions. It creates the folder and a 5-minute trigger, then logs the folder ID.'),
         h('li', null, 'Paste that folder ID above. Share the folder with trainers only (Editor). Never share it with trainees.'),
-        h('li', null, 'On Sources, ask for a fresh export, wait a few minutes, then import.'))),
+        h('li', null, 'Sources then load on their own.'))),
     h('section', { class: 'panel' },
       h('h2', null, 'This view'),
       h('ul', { class: 'small' },
@@ -3421,6 +3627,7 @@ async function boot() {
     S.error = errorText(e);
   }
   render();
+  autoRefreshSources(false);
 }
 
 function noMcp() { return Promise.reject(ServiceError('NO_CONNECTORS', 'Connectors are not available on this view, so Google Drive cannot be reached.')); }

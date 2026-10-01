@@ -853,9 +853,10 @@ var TRIAGE_TYPE = {
     });
     if (!isBlank(entry.tag)) correct.tag = entry.tag;
     if (!isBlank(entry.checklist)) correct.checklist = entry.checklist;
-    if (isBlank(entry.tag) || isBlank(entry.checklist)) {
-      flags.push(makeFlag('CATALOG_GAP', 'The catalog entry "' + entry.name + '" has no documented ' +
-        (isBlank(entry.tag) ? 'tag' : 'checklist') + '; that question was left out for this ticket.', false));
+    var missing = [isBlank(entry.tag) ? 'tag' : null, isBlank(entry.checklist) ? 'checklist' : null].filter(Boolean);
+    if (missing.length) {
+      flags.push(makeFlag('CATALOG_GAP', 'The catalog entry "' + entry.name + '" has no documented ' + missing.join(' or ') +
+        '; ' + (missing.length > 1 ? 'those questions were' : 'that question was') + ' left out for this ticket. Add them to the catalog entry if the Library documents them.', false));
     }
     return {
       correctAnswer: correct,

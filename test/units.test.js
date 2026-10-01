@@ -107,3 +107,11 @@ test('json check catches missing fields and bad enums', () => {
   assert.ok(problems.some(p => p.includes('ticket is missing')));
   assert.ok(problems.some(p => p.includes('must be one of')));
 });
+
+test('catalog gap names every missing part', () => {
+  const t = core.getDrillType('TRIAGE');
+  const catalog = [{ catalogId: 'P1', name: 'Unused Voucher', tag: '', checklist: '' }, { catalogId: 'P2', name: 'Lockout', tag: 'x', checklist: 'y' }];
+  const key = t.buildAnswerKey({ correctProcessId: 'P1', requiredAccountDetail: 'd', category: 'Voucher refund' }, { catalog }, t.questions({ catalog }));
+  assert.match(key.flags[0].message, /no documented tag or checklist; those questions were left out/);
+  assert.deepEqual(plain(key.questions.map(q => q.key)), ['process', 'reasoning']);
+});

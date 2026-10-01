@@ -7,17 +7,19 @@
 var DRIVE = 'Google Drive';
 var SLACK = 'Slack';
 
+// The db delivers frozen documents; the drill service edits what it reads, so every
+// read returns a private copy.
 function makeDbStore(db) {
   return {
     async get(coll, id) {
       var snap = await db.collection(coll).doc(id).get();
-      return snap.exists ? snap.data() : null;
+      return snap.exists ? deepClone(snap.data()) : null;
     },
     async list(coll, where) {
       var q = db.collection(coll);
       if (where) q = q.where(where[0], '==', where[1]);
       var snap = await q.limit(1000).get();
-      return snap.docs.map(function (d) { return d.data(); });
+      return snap.docs.map(function (d) { return deepClone(d.data()); });
     },
     async put(coll, id, obj) {
       await db.collection(coll).doc(id).set(JSON.parse(JSON.stringify(obj)));

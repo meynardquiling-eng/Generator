@@ -685,7 +685,7 @@ function viewSources() {
         h('input', { id: 'src-filter', placeholder: 'Search sections (e.g. ETF, free month, lock-out)', value: S.sourceFilter, onchange: function () { S.sourceFilter = val('src-filter'); render(); } }),
         h('p', { class: 'small muted' }, matches.length + ' of ' + sections.length + ' sections' + (matches.length > 40 ? ', showing 40' : '')),
         matches.slice(0, 40).map(function (s) {
-          return h('details', { class: 'panel flat' }, h('summary', null, pill(s.sourceType === 'CSQ_SLACK' ? 'CSQ Slack' : 'Library'), ' ', s.path || s.heading, ' ', h('span', { class: 'mono muted' }, s.sectionId)),
+          return h('details', { class: 'source-row' }, h('summary', null, pill(s.sourceType === 'CSQ_SLACK' ? 'CSQ Slack' : 'Library'), ' ', s.path || s.heading, ' ', h('span', { class: 'mono muted' }, s.sectionId)),
             h('p', { class: 'small', style: 'white-space:pre-wrap;margin-top:6px' }, s.text.slice(0, 3000)), s.url ? h('a', { href: s.url, target: '_blank', rel: 'noopener', class: 'small' }, 'Open in Google Docs') : null);
         })) : null),
     h('section', { class: 'panel' },

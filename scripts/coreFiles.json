@@ -1,0 +1,18 @@
+[
+  "src/core/util.js",
+  "src/core/lifecycle.js",
+  "src/core/ids.js",
+  "src/core/schemas.js",
+  "src/core/grounding.js",
+  "src/core/jsonCheck.js",
+  "src/drills/approveDeny.js",
+  "src/drills/triage.js",
+  "src/drills/registry.js",
+  "src/core/generator.js",
+  "src/core/formSpec.js",
+  "src/core/responseMapper.js",
+  "src/core/scoring.js",
+  "src/core/coaching.js",
+  "src/core/slackSources.js",
+  "src/core/drillService.js"
+]

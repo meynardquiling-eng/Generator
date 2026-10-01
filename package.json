@@ -1,0 +1,13 @@
+{
+  "name": "training-drill-generator",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Trainer-facing drill generator dashboard (claude.ai Artifact) with a Google Apps Script Form Bridge.",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "build": "node scripts/build.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

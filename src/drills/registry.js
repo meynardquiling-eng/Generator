@@ -18,7 +18,8 @@ function listDrillTypeSummaries() {
   return getDrillTypes().map(function (d) {
     return {
       type: d.type, name: d.name, description: d.description, cadence: d.cadence,
-      defaults: d.defaults, requiresCatalog: !!d.requiresCatalog, categories: d.categories || null
+      defaults: d.defaults, requiresCatalog: !!d.requiresCatalog, categories: d.categories || null,
+      audiences: d.audiences || ['CUSTOMER']
     };
   });
 }

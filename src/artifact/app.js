@@ -4,7 +4,7 @@ var S = {
   view: 'today', drillId: null, tab: 'scenarios',
   drills: [], bundle: null, settings: null, report: null, reportType: '',
   catalog: [], sections: null, sourceFilter: '', sourceSummary: null, sourceRun: null,
-  editing: {}, confirmRemove: null, confirmDelete: null, respTrainee: '',
+  editing: {}, confirmRemove: null, confirmDelete: null, respTrainee: '', ndSide: 'CUSTOMER',
   busy: null, error: null, ready: false, fatal: null,
   caps: { db: false, sample: false, mcp: false, user: false }, canWrite: null, actor: 'unknown', names: {}
 };
@@ -220,9 +220,9 @@ async function startToday() {
   if (S.caps.sample) generateAll(d.drillId);
 }
 
-function topicOptions() {
+function topicOptions(side) {
   var lib = libraryTopics(S.sections || []);
-  var presetLabels = TOPIC_PRESETS.map(function (p) { return p.label; });
+  var presetLabels = topicPresetsFor(side).map(function (p) { return p.label; });
   return { presets: presetLabels, library: lib.filter(function (t) { return presetLabels.indexOf(t) === -1; }) };
 }
 
@@ -233,8 +233,11 @@ function chosenTopic() {
 }
 
 function viewNewDrill() {
-  var types = listDrillTypeSummaries();
-  var opts = topicOptions();
+  var side = S.ndSide;
+  var types = listDrillTypeSummaries().filter(function (t) { return t.audiences.indexOf(side) !== -1; });
+  var opts = topicOptions(side);
+  var sideSel = h('select', { id: 'nd-side', onchange: function () { S.ndSide = val('nd-side'); render(); } },
+    AUDIENCES.map(function (a) { return h('option', { value: a.id, selected: a.id === side }, a.label); }));
   var sel = h('select', { id: 'nd-type', onchange: function () {
     var t = types.filter(function (x) { return x.type === val('nd-type'); })[0];
     document.getElementById('nd-count').value = t.defaults.scenarioCount;
@@ -252,7 +255,9 @@ function viewNewDrill() {
     h('option', { value: '__other' }, 'Other (type your own)\u2026'));
   return h('section', { class: 'panel' },
     h('h2', null, 'New drill'),
+    side === 'CP' ? h('p', { class: 'small muted' }, 'CP side tickets come from cleaner partners. Approve or Deny is C-side only.') : null,
     h('div', { class: 'fields' },
+      field('Agent side', sideSel),
       field('Drill type', sel),
       field('Topic', topic),
       h('label', { class: 'field', id: 'nd-topic-other-wrap', hidden: true }, h('span', { class: 'label' }, 'Your topic'), h('input', { id: 'nd-topic-other', placeholder: 'e.g. Pause requests' })),
@@ -261,7 +266,7 @@ function viewNewDrill() {
       field('Minutes', h('input', { id: 'nd-min', type: 'number', min: '1', value: String(types[0].defaults.targetMinutes) }))
     ),
     h('div', { class: 'row' }, btn('Create and generate', async function () {
-      var input = { drillType: val('nd-type'), topic: chosenTopic(), scenarioCount: val('nd-count'), difficulty: val('nd-diff'), targetMinutes: val('nd-min') };
+      var input = { drillType: val('nd-type'), audience: side, topic: chosenTopic(), scenarioCount: val('nd-count'), difficulty: val('nd-diff'), targetMinutes: val('nd-min') };
       if (val('nd-topic') === '__other' && !input.topic) { S.error = 'Type a topic, or pick one from the list.'; render(); return; }
       var d = await act('Creating drill', function () { return svc.createDrill(input); });
       if (!d) return;
@@ -280,11 +285,12 @@ function viewDrills() {
   return h('section', { class: 'panel' },
     h('h2', null, 'Drills'),
     h('div', { class: 'table-wrap' }, h('table', null,
-      h('thead', null, h('tr', null, ['Drill ID', 'Type', 'Topic', 'Created', 'Tickets', 'Google Form', 'Submissions', 'Status', ''].map(function (c) { return h('th', null, c); }))),
+      h('thead', null, h('tr', null, ['Drill ID', 'Type', 'Side', 'Topic', 'Created', 'Tickets', 'Google Form', 'Submissions', 'Status', ''].map(function (c) { return h('th', null, c); }))),
       h('tbody', null, S.drills.map(function (d) {
         return h('tr', { class: 'click', tabindex: '0', onclick: function () { openDrill(d.drillId); }, onkeydown: function (e) { if (e.key === 'Enter') openDrill(d.drillId); } },
           h('td', { class: 'mono' }, d.drillId),
           h('td', null, getDrillType(d.drillType).name),
+          h('td', null, getAudience(d.audience).short),
           h('td', null, d.topic || h('span', { class: 'muted' }, 'Mixed')),
           h('td', null, fmtDate(d.createdAt)),
           h('td', null, String(d.scenarioCount)),
@@ -353,7 +359,7 @@ function viewDrill() {
         h('div', { class: 'stack', style: 'gap:4px' },
           h('span', { class: 'mono muted' }, d.drillId),
           h('h2', null, d.title),
-          h('span', { class: 'muted small' }, [typeDef.name, d.config.topic || 'Mixed topics', d.config.scenarioCount + ' tickets', d.config.targetMinutes + ' min', d.config.difficulty.toLowerCase()].join(' \u00B7 '))),
+          h('span', { class: 'muted small' }, [typeDef.name, getAudience(d.config.audience).short, d.config.topic || 'Mixed topics', d.config.scenarioCount + ' tickets', d.config.targetMinutes + ' min', d.config.difficulty.toLowerCase()].join(' \u00B7 '))),
         statusPill(d.status)),
       h('div', { class: 'stepper', 'aria-label': 'Drill lifecycle' }, STEPS.map(function (s, i) {
         return h('span', { class: i < idx ? 'done' : i === idx ? 'now' : '' }, STEP_LABEL[s]);
@@ -766,16 +772,20 @@ function viewSources() {
 }
 
 function viewCatalog() {
-  var entries = S.catalog.filter(function (e) { return e.status === 'APPROVED'; }).sort(function (a, b) { return a.name < b.name ? -1 : 1; });
-  return h('section', { class: 'panel' },
-    h('div', { class: 'row spread' }, h('h2', null, 'Triage processes'),
-      btn('Rebuild from sources', function () { act('Finding documented processes', async function () { await svc.proposeCatalog(); S.catalog = await svc.listCatalog(); }); }, { disabled: !S.caps.sample })),
-    h('p', { class: 'muted small' }, 'Answer choices for Triage drills. Built automatically from processes the sources spell out.'),
-    entries.length ? h('div', { class: 'table-wrap' }, h('table', null,
-      h('thead', null, h('tr', null, h('th', null, 'Process'), h('th', null, 'Tag'), h('th', null, 'Checklist'))),
-      h('tbody', null, entries.map(function (e) {
-        return h('tr', null, h('td', null, e.name, e.sourceTitle && e.sourceTitle !== e.name ? h('div', { class: 'small muted' }, 'Library: ' + e.sourceTitle) : null), h('td', null, e.tag || h('span', { class: 'muted' }, '\u2014')), h('td', null, e.checklist || h('span', { class: 'muted' }, '\u2014')));
-      })))) : h('p', { class: 'muted small' }, 'Built the first time you create a Triage drill.'));
+  return h('div', { class: 'stack' }, AUDIENCES.map(function (a) {
+    var entries = S.catalog.filter(function (e) { return e.status === 'APPROVED' && (e.audience || 'CUSTOMER') === a.id; })
+      .sort(function (x, y) { return x.name < y.name ? -1 : 1; });
+    return h('section', { class: 'panel' },
+      h('div', { class: 'row spread' }, h('h2', null, 'Triage processes \u00B7 ' + a.short),
+        btn('Rebuild from sources', function () { act('Finding documented ' + a.short + ' processes', async function () { await svc.proposeCatalog(a.id); S.catalog = await svc.listCatalog(); }); }, { disabled: !S.caps.sample })),
+      h('p', { class: 'muted small' }, 'Answer choices for ' + a.short + ' Triage drills, built automatically from processes the sources spell out.'),
+      entries.length ? h('div', { class: 'table-wrap' }, h('table', null,
+        h('thead', null, h('tr', null, h('th', null, 'Process'), h('th', null, 'Tag'), h('th', null, 'Checklist'))),
+        h('tbody', null, entries.map(function (e) {
+          return h('tr', null, h('td', null, e.name, e.sourceTitle && e.sourceTitle !== e.name ? h('div', { class: 'small muted' }, 'Library: ' + e.sourceTitle) : null),
+            h('td', null, e.tag || h('span', { class: 'muted' }, '\u2014')), h('td', null, e.checklist || h('span', { class: 'muted' }, '\u2014')));
+        })))) : h('p', { class: 'muted small' }, 'Built the first time you create a ' + a.short + ' Triage drill.'));
+  }));
 }
 
 // ---------------------------------------------------------------- Settings

@@ -18,7 +18,8 @@ var TOPIC_STOPWORDS = { the: 1, and: 1, for: 1, with: 1, tickets: 1, ticket: 1, 
 
 function topicKeywords(topic) {
   if (isBlank(topic)) return [];
-  var preset = TOPIC_PRESETS.filter(function (p) { return normalizeText(p.label) === normalizeText(topic); })[0];
+  var all = TOPIC_PRESETS.concat(typeof CP_TOPIC_PRESETS !== 'undefined' ? CP_TOPIC_PRESETS : []);
+  var preset = all.filter(function (p) { return normalizeText(p.label) === normalizeText(topic); })[0];
   if (preset) return preset.keywords.slice();
   var words = normalizeText(topic).split(/[^a-z0-9-]+/).filter(function (w) { return w.length >= 3 && !TOPIC_STOPWORDS[w]; });
   return uniq([normalizeText(topic)].concat(words));

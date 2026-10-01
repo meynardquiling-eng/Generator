@@ -109,28 +109,34 @@ function createDrillService(deps) {
     return sections;
   }
 
-  async function approvedCatalog() {
+  async function approvedCatalog(audience) {
+    audience = audience || 'CUSTOMER';
     return (await store.list(COLLECTIONS.catalog, ['status', 'APPROVED']))
+      .filter(function (e) { return (e.audience || 'CUSTOMER') === audience; })
       .sort(function (a, b) { return a.name < b.name ? -1 : 1; });
   }
 
   async function buildContext(drill, typeDef, opts, scenarios) {
     opts = opts || {};
     var topic = (drill.config && drill.config.topic) || '';
+    var audience = getAudience(drill.config && drill.config.audience).id;
     var all = await getAllSections();
     if (topic && all.length && !sectionsMatchingTopic(all, topic).length) {
       throw ServiceError('NO_SOURCE_MATERIAL', 'Nothing in the Knowledge Library or CSQ Slack mentions "' + topic + '". Try a different wording for the topic.');
     }
-    var sections = selectSections(all, typeDef.sourceKeywords, SOURCE_PROMPT_CHARS, topicKeywords(topic));
-    var catalog = typeDef.requiresCatalog ? await ensureCatalog() : [];
+    var sections = selectSections(all, typeDef.sourceKeywords.concat(getAudience(audience).keywords), SOURCE_PROMPT_CHARS,
+      topicKeywords(topic).concat(audience === 'CP' ? getAudience('CP').keywords : []));
+    var catalog = typeDef.requiresCatalog ? await ensureCatalog(audience) : [];
+    var categories = typeDef.categoriesByAudience ? typeDef.categoriesByAudience[audience] : typeDef.categories;
     var active = activeScenarios(scenarios || []);
     var category = opts.category || null;
-    if (!category && !topic && typeDef.categories) {
-      category = typeDef.categories[active.length % typeDef.categories.length];
+    if (!category && !topic && categories) {
+      category = categories[active.length % categories.length];
     }
     return {
       drill: drill,
       topic: topic,
+      audience: audience,
       today: clock.today(),
       difficulty: opts.difficulty || drill.config.difficulty,
       sections: sections,
@@ -173,15 +179,20 @@ function createDrillService(deps) {
       }
       var count = parseInt(input.scenarioCount, 10) || typeDef.defaults.scenarioCount;
       var topic = String(input.topic || '').trim().slice(0, 80);
+      var audience = getAudience(input.audience).id;
+      if ((typeDef.audiences || ['CUSTOMER']).indexOf(audience) === -1) {
+        throw ServiceError('WRONG_SIDE', typeDef.name + ' drills are for ' + (typeDef.audiences || ['CUSTOMER']).map(function (a) { return getAudience(a).short; }).join(' or ') + ' agents only.');
+      }
       var drill = {
         drillId: drillId, drillType: typeDef.type, drillDate: today,
-        title: input.title || (topic ? typeDef.name + ' · ' + topic : typeDef.name),
+        title: input.title || [typeDef.name, audience === 'CP' ? 'CP side' : null, topic || null].filter(Boolean).join(' · '),
         status: DrillStatus.DRAFT,
         config: {
           scenarioCount: Math.max(1, Math.min(count, 25)),
           difficulty: DIFFICULTY_GUIDANCE[input.difficulty] ? input.difficulty : typeDef.defaults.difficulty,
           targetMinutes: parseInt(input.targetMinutes, 10) || typeDef.defaults.targetMinutes,
-          topic: topic
+          topic: topic,
+          audience: audience
         },
         nextScenarioSeq: 1,
         createdAt: now(), createdBy: actor, updatedAt: now(),
@@ -198,7 +209,7 @@ function createDrillService(deps) {
     return drills.sort(function (a, b) { return a.createdAt < b.createdAt ? 1 : -1; }).map(function (d) {
       return {
         drillId: d.drillId, drillType: d.drillType, title: d.title, status: d.status, createdAt: d.createdAt,
-        drillDate: d.drillDate, scenarioCount: d.config.scenarioCount, topic: d.config.topic || '',
+        drillDate: d.drillDate, scenarioCount: d.config.scenarioCount, topic: d.config.topic || '', audience: d.config.audience || 'CUSTOMER',
         formStatus: d.form ? d.form.state : 'NONE', formUrl: d.form && d.form.publishedUrl,
         submissions: d.responseStats ? d.responseStats.responses : 0,
         trainees: d.responseStats ? d.responseStats.trainees : 0,
@@ -882,33 +893,36 @@ function createDrillService(deps) {
 
   // Triage answer choices come from documented processes. Entries backed by a quote that
   // is really in the sources are used automatically; unbacked ones are dropped.
-  async function ensureCatalog() {
-    var approved = await approvedCatalog();
+  async function ensureCatalog(audience) {
+    audience = audience || 'CUSTOMER';
+    var approved = await approvedCatalog(audience);
     // Entries saved before short process names were introduced are rebuilt once.
     var current = approved.filter(function (e) { return e.nameVersion === PROCESS_NAME_VERSION; });
     if (current.length >= 2 && current.length === approved.length) return approved;
-    await proposeCatalog();
-    approved = await approvedCatalog();
+    await proposeCatalog(audience);
+    approved = await approvedCatalog(audience);
     if (approved.length < 2) {
-      throw ServiceError('CATALOG_REQUIRED', 'Could not find at least two documented triage processes in the sources. Refresh sources and try again.');
+      throw ServiceError('CATALOG_REQUIRED', 'Could not find at least two documented ' + getAudience(audience).short + ' triage processes in the sources. Refresh sources and try again.');
     }
     return approved;
   }
 
-  async function proposeCatalog() {
-    var sections = selectSections(await getAllSections(), TRIAGE_TYPE.sourceKeywords, SOURCE_PROMPT_CHARS);
-    var entries = await proposeCatalogEntries(TRIAGE_TYPE, sections, llm);
+  async function proposeCatalog(audience) {
+    audience = getAudience(audience).id;
+    var sections = selectSections(await getAllSections(), TRIAGE_TYPE.sourceKeywords, SOURCE_PROMPT_CHARS,
+      audience === 'CP' ? getAudience('CP').keywords : []);
+    var entries = await proposeCatalogEntries(TRIAGE_TYPE, sections, llm, audience);
     var saved = [];
     var keepIds = {};
     for (var i = 0; i < entries.length; i++) {
       var e = entries[i];
-      var id = 'PROC-' + hashString(normalizeText(e.name)).slice(0, 6).toUpperCase();
+      var id = 'PROC-' + (audience === 'CP' ? 'CP-' : '') + hashString(normalizeText(e.name)).slice(0, 6).toUpperCase();
       if (keepIds[id]) continue;
       keepIds[id] = true;
       var verified = (e.sources || []).some(function (x) { return x.verified; });
       var doc = Object.assign({ catalogId: id, proposedAt: now(), proposedBy: actor }, e, {
         status: verified ? 'APPROVED' : 'REJECTED', approvedBy: verified ? 'auto (verified quote)' : null,
-        nameVersion: PROCESS_NAME_VERSION
+        nameVersion: PROCESS_NAME_VERSION, audience: audience
       });
       await store.put(COLLECTIONS.catalog, id, doc);
       saved.push(doc);
@@ -917,7 +931,7 @@ function createDrillService(deps) {
     if (saved.some(function (d) { return d.status === 'APPROVED'; })) {
       var all = await store.list(COLLECTIONS.catalog);
       for (var j = 0; j < all.length; j++) {
-        if (!keepIds[all[j].catalogId] && all[j].status === 'APPROVED') {
+        if (!keepIds[all[j].catalogId] && all[j].status === 'APPROVED' && (all[j].audience || 'CUSTOMER') === audience) {
           all[j].status = 'REPLACED';
           all[j].replacedAt = now();
           await store.put(COLLECTIONS.catalog, all[j].catalogId, all[j]);

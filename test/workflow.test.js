@@ -536,3 +536,25 @@ test('old long-named catalog entries are rebuilt once and replaced', async () =>
   await env.svc.generateNextScenario(d.drillId);
   assert.equal(env.llm.calls, calls + 1, 'catalog is not rebuilt again');
 });
+
+test('agent side: CP drills use CP senders, CP sources and a separate CP process catalog', async () => {
+  const env = await setup();
+  await assert.rejects(env.svc.createDrill({ drillType: 'APPROVE_DENY', audience: 'CP' }), /C-side agents only/);
+  const cp = await env.svc.createDrill({ drillType: 'TRIAGE', audience: 'CP', scenarioCount: 1 });
+  assert.equal(cp.config.audience, 'CP');
+  assert.match(cp.title, /CP side/);
+  const s = await env.svc.generateNextScenario(cp.drillId);
+  const prompt = env.llm.prompts[env.llm.prompts.length - 1];
+  assert.match(prompt, /AGENT SIDE: CP side\. The ticket is from a cleaner partner/);
+  assert.deepEqual(plain(s.trainee.questions.find(q => q.key === 'process').choices.slice().sort()), ['CP Lockout Pay', 'Missing Payout']);
+  assert.equal(s.category, 'CP lockout');
+  // A C-side triage drill gets its own catalog, untouched by the CP one.
+  const c = await env.svc.createDrill({ drillType: 'TRIAGE', scenarioCount: 1 });
+  assert.equal(c.config.audience, 'CUSTOMER');
+  const s2 = await env.svc.generateNextScenario(c.drillId);
+  assert.deepEqual(plain(s2.trainee.questions.find(q => q.key === 'process').choices.slice().sort()), ['Lockout Refund', 'Unused Voucher']);
+  const cat = await env.svc.listCatalog();
+  assert.ok(cat.filter(e => e.audience === 'CP' && e.status === 'APPROVED').length === 2);
+  assert.match(env.llm.prompts[env.llm.prompts.length - 1], /AGENT SIDE: C-side\. The ticket is from a customer/);
+  assert.deepEqual(plain((await env.svc.listDrills()).map(d => d.audience).sort()), ['CP', 'CUSTOMER']);
+});

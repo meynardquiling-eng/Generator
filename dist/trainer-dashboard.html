@@ -37,6 +37,7 @@
   --bad: #f2827a; --bad-soft: #3d1d1b; color-scheme: dark;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { background: var(--bg); color: var(--ink); font-family: var(--font-ui); font-size: 14px; line-height: 1.5; }
 a { color: var(--accent); }
 h1, h2, h3 { text-wrap: balance; line-height: 1.25; margin: 0; }
@@ -650,7 +651,8 @@ var TOPIC_STOPWORDS = { the: 1, and: 1, for: 1, with: 1, tickets: 1, ticket: 1, 
 
 function topicKeywords(topic) {
   if (isBlank(topic)) return [];
-  var preset = TOPIC_PRESETS.filter(function (p) { return normalizeText(p.label) === normalizeText(topic); })[0];
+  var all = TOPIC_PRESETS.concat(typeof CP_TOPIC_PRESETS !== 'undefined' ? CP_TOPIC_PRESETS : []);
+  var preset = all.filter(function (p) { return normalizeText(p.label) === normalizeText(topic); })[0];
   if (preset) return preset.keywords.slice();
   var words = normalizeText(topic).split(/[^a-z0-9-]+/).filter(function (w) { return w.length >= 3 && !TOPIC_STOPWORDS[w]; });
   return uniq([normalizeText(topic)].concat(words));
@@ -674,6 +676,42 @@ function sectionsMatchingTopic(sections, topic) {
     var hay = normalizeText((s.path || s.heading || '') + ' ' + s.text);
     return kws.some(function (k) { return hay.indexOf(k) !== -1; });
   });
+}
+
+// ---- src/core/audience.js
+// Agent side: C-side agents handle customer tickets; CP Gen agents handle tickets from
+// cleaner partners (CPs). The side decides who writes the ticket, which sources rank
+// first, the topic list, and (for Triage) the process catalog.
+
+var AUDIENCES = [
+  {
+    id: 'CUSTOMER', label: 'C-side (customer-facing)', short: 'C-side',
+    sender: 'a customer (C) writing to Homeaglow Care',
+    keywords: ['customer', 'membership', 'voucher', 'refund', 'retention', 'etf', 'fcf', 'dhj']
+  },
+  {
+    id: 'CP', label: 'CP side (CP Gen)', short: 'CP side',
+    sender: 'a cleaner partner (CP) writing to Homeaglow’s CP support team. Use CP-facing policy: payouts, job claims and cancellations, invoices, pending invoices, lockouts on site, ratings, tiering, profile status and deactivation',
+    keywords: ['cp', 'cleaner', 'cleaner partner', 'payout', 'pay', 'claim', 'claimed', 'invoice', 'pending invoice', 'deactivation', 'tier', 'tiering', 'cp profile', 'cp-facing']
+  }
+];
+
+var CP_TOPIC_PRESETS = [
+  { label: 'CP lockouts', keywords: ['lockout', 'lock-out', 'locked out', 'could not get in'] },
+  { label: 'CP payouts', keywords: ['payout', 'pay', 'payment', 'paid'] },
+  { label: 'Job claims and CP cancellations', keywords: ['claim', 'claimed', 'cp cancel', 'cancellation'] },
+  { label: 'Pending invoices', keywords: ['pending invoice', 'invoice', 'invoiced'] },
+  { label: 'CP deactivation', keywords: ['deactivation', 'deactivated', 'profile status'] },
+  { label: 'CP tiering', keywords: ['tier', 'tiering'] },
+  { label: 'Late or no-show CP', keywords: ['no-show', 'no show', 'late', 'tardiness'] }
+];
+
+function getAudience(id) {
+  return AUDIENCES.filter(function (a) { return a.id === id; })[0] || AUDIENCES[0];
+}
+
+function topicPresetsFor(audienceId) {
+  return audienceId === 'CP' ? CP_TOPIC_PRESETS : TOPIC_PRESETS;
 }
 
 // ---- src/core/readability.js
@@ -745,6 +783,7 @@ var APPROVE_DENY_TYPE = {
   cadence: 'DAILY',
   defaults: { scenarioCount: 5, targetMinutes: 15, difficulty: 'HARD' },
   requiresCatalog: false,
+  audiences: ['CUSTOMER'],
   sourceKeywords: [
     'free month', 'mf reduction', 'membership fee', 'etf', 'early termination', 'waiver', 'waive',
     'retention', 'retain', 'cancel', 'cancellation', 'membership', 'forever clean', 'downgrade', 'pause'
@@ -859,6 +898,14 @@ function commonScenarioOutputSchema() {
 // by a trainer before any triage drill can be generated.
 
 var TRIAGE_CATEGORIES = ['Unused-voucher issue', 'Lock-out refund', 'Voucher refund', 'General retention'];
+var TRIAGE_CATEGORIES_BY_AUDIENCE = {
+  CUSTOMER: TRIAGE_CATEGORIES,
+  CP: ['CP lockout', 'Payout issue', 'Job claim or cancellation', 'Account or deactivation']
+};
+
+function triageCategories(audienceId) {
+  return TRIAGE_CATEGORIES_BY_AUDIENCE[audienceId] || TRIAGE_CATEGORIES;
+}
 
 var TRIAGE_TYPE = {
   type: 'TRIAGE',
@@ -870,6 +917,8 @@ var TRIAGE_TYPE = {
   defaults: { scenarioCount: 8, targetMinutes: 30, difficulty: 'MEDIUM' },
   requiresCatalog: true,
   categories: TRIAGE_CATEGORIES,
+  categoriesByAudience: TRIAGE_CATEGORIES_BY_AUDIENCE,
+  audiences: ['CUSTOMER', 'CP'],
   sourceKeywords: [
     'unused voucher', 'voucher', 'lock-out', 'lockout', 'locked out', 'refund', 'retention',
     'checklist', 'interactive checklist', 'tag', 'process', 'macro', 'workflow', 'triage'
@@ -921,7 +970,7 @@ var TRIAGE_TYPE = {
     return [
       'Drill: "Triage-Only". The trainee does not reply to the customer; they only pick the process, tag and checklist.',
       'Approved process catalog (the ONLY valid answers):\n' + list,
-      'correctProcessId must be one of the catalog ids above. Ticket category should be: ' + (ctx.category || 'any of ' + TRIAGE_CATEGORIES.join(', ')) + '.',
+      'correctProcessId must be one of the catalog ids above. Ticket category should be: ' + (ctx.category || 'any of ' + triageCategories(ctx.audience).join(', ')) + '.',
       'Write the ticket so that surface keywords point toward a plausible but wrong process at least some of the time; the account facts must decide it.',
       'requiredAccountDetail is the single fact that determines the process.'
     ].join('\n\n');
@@ -930,7 +979,7 @@ var TRIAGE_TYPE = {
   outputSchema: function (ctx) {
     var schema = commonScenarioOutputSchema();
     var ids = (ctx.catalog || []).map(function (c) { return c.catalogId; });
-    schema.properties.category = { type: 'string', enum: TRIAGE_CATEGORIES };
+    schema.properties.category = { type: 'string', enum: triageCategories(ctx.audience) };
     schema.properties.correctProcessId = ids.length ? { type: 'string', enum: ids } : { type: 'string' };
     schema.properties.requiredAccountDetail = { type: 'string' };
     schema.required.push('category', 'correctProcessId', 'requiredAccountDetail');
@@ -965,9 +1014,10 @@ var TRIAGE_TYPE = {
     };
   },
 
-  catalogPromptGuidance: function () {
+  catalogPromptGuidance: function (audienceId) {
     return [
-      'Extract the list of documented ticket-handling processes relevant to these categories: ' + TRIAGE_CATEGORIES.join(', ') + '.',
+      'Extract the list of documented ticket-handling processes ' + (audienceId === 'CP' ? 'that CP-side agents use for tickets from cleaner partners (CPs)' : 'that C-side agents use for customer tickets') +
+        ', relevant to these categories: ' + triageCategories(audienceId).join(', ') + '. ',
       'For each process give: name = a short label of 2 to 5 key words taken from the source heading, dropping filler such as "Process guide", "How to", "if C wants" ',
       '(example: "Process Guide if C wants a Groupon Voucher refunded" becomes "Groupon voucher refund"); sourceTitle = the heading exactly as written in the source; ',
       'the exact tag to apply (empty string if the source does not name one); the exact interactive checklist/process to launch (empty string if not documented); ',
@@ -976,7 +1026,7 @@ var TRIAGE_TYPE = {
     ].join('');
   },
 
-  catalogOutputSchema: function () {
+  catalogOutputSchema: function (audienceId) {
     return {
       type: 'object', additionalProperties: false,
       properties: {
@@ -986,7 +1036,7 @@ var TRIAGE_TYPE = {
             type: 'object', additionalProperties: false,
             properties: {
               name: { type: 'string' }, sourceTitle: { type: 'string' }, tag: { type: 'string' }, checklist: { type: 'string' },
-              category: { type: 'string', enum: TRIAGE_CATEGORIES }, whenToUse: { type: 'string' },
+              category: { type: 'string', enum: triageCategories(audienceId) }, whenToUse: { type: 'string' },
               citations: {
                 type: 'array',
                 items: {
@@ -1050,7 +1100,8 @@ function listDrillTypeSummaries() {
   return getDrillTypes().map(function (d) {
     return {
       type: d.type, name: d.name, description: d.description, cadence: d.cadence,
-      defaults: d.defaults, requiresCatalog: !!d.requiresCatalog, categories: d.categories || null
+      defaults: d.defaults, requiresCatalog: !!d.requiresCatalog, categories: d.categories || null,
+      audiences: d.audiences || ['CUSTOMER']
     };
   });
 }
@@ -1078,7 +1129,7 @@ var GENERATOR_SYSTEM_PROMPT = [
   'For every claim in the answer key add a citation: the source id and a short quote copied word for word from that source. Never paraphrase inside a quote.',
   'If the Knowledge Library and a Slack message disagree, follow the more recent clarification and describe the disagreement in sourceConflict; otherwise leave sourceConflict empty.',
   'If the sources do not clearly give the correct answer, write a different ticket that they do cover. If none is possible, set insufficientSource to true and say what is missing in insufficientReason. Never invent a policy.',
-  'STYLE. Write like a real customer: short, plain, everyday words (easy for a new hire to read). Title: 3 to 6 words. Ticket: 2 to 4 short sentences, under 80 words. No long backstory.',
+  'STYLE. Write like the real sender (a customer or a cleaner partner, as the prompt says): short, plain, everyday words (easy for a new hire to read). Title: 3 to 6 words. Ticket: 2 to 4 short sentences, under 80 words. No long backstory.',
   'Account details: 3 to 6 short label/value pairs, each value a few words (for example "Plan: FCF $19/month", "Last cleaning: Sep 22, 2026"). Include only facts an agent would check, plus at most one that does not matter.',
   'DATES. Use current dates. Every date must be within the last 12 months of today (scheduled cleanings may be up to 2 months ahead). Write dates like "Sep 22, 2026".',
   'Do not state the answer, name the policy, or hint at "the correct action" in the ticket or account details.',
@@ -1089,6 +1140,7 @@ var GENERATOR_SYSTEM_PROMPT = [
 function buildGenerationPrompt(typeDef, ctx) {
   var parts = [];
   parts.push('Today is ' + humanDate(ctx.today) + '.');
+  parts.push('AGENT SIDE: ' + getAudience(ctx.audience).short + '. The ticket is from ' + getAudience(ctx.audience).sender + '.');
   if (ctx.topic) parts.push('TOPIC: every ticket in this drill must be about "' + ctx.topic + '". Use the sources about this topic.');
   parts.push(typeDef.promptGuidance(ctx));
   parts.push('Difficulty: ' + ctx.difficulty + ' — ' + (DIFFICULTY_GUIDANCE[ctx.difficulty] || ''));
@@ -1202,12 +1254,12 @@ function recomputeContentFlags(scenario) {
   return scenario;
 }
 
-async function proposeCatalogEntries(typeDef, sections, llm) {
+async function proposeCatalogEntries(typeDef, sections, llm, audienceId) {
   if (!sections.length) throw ServiceError('NO_SOURCE_MATERIAL', 'No source sections matched the triage keywords. Refresh sources first.');
-  var schema = typeDef.catalogOutputSchema();
+  var schema = typeDef.catalogOutputSchema(audienceId);
   var out = await llm.generateJson({
     system: GENERATOR_SYSTEM_PROMPT,
-    user: typeDef.catalogPromptGuidance() + '\n\nApproved sources:\n\n' + formatSectionsForPrompt(sections),
+    user: typeDef.catalogPromptGuidance(audienceId) + '\n\nApproved sources:\n\n' + formatSectionsForPrompt(sections),
     schema: schema
   });
   var problems = checkJsonAgainstSchema(out, schema);
@@ -1843,28 +1895,34 @@ function createDrillService(deps) {
     return sections;
   }
 
-  async function approvedCatalog() {
+  async function approvedCatalog(audience) {
+    audience = audience || 'CUSTOMER';
     return (await store.list(COLLECTIONS.catalog, ['status', 'APPROVED']))
+      .filter(function (e) { return (e.audience || 'CUSTOMER') === audience; })
       .sort(function (a, b) { return a.name < b.name ? -1 : 1; });
   }
 
   async function buildContext(drill, typeDef, opts, scenarios) {
     opts = opts || {};
     var topic = (drill.config && drill.config.topic) || '';
+    var audience = getAudience(drill.config && drill.config.audience).id;
     var all = await getAllSections();
     if (topic && all.length && !sectionsMatchingTopic(all, topic).length) {
       throw ServiceError('NO_SOURCE_MATERIAL', 'Nothing in the Knowledge Library or CSQ Slack mentions "' + topic + '". Try a different wording for the topic.');
     }
-    var sections = selectSections(all, typeDef.sourceKeywords, SOURCE_PROMPT_CHARS, topicKeywords(topic));
-    var catalog = typeDef.requiresCatalog ? await ensureCatalog() : [];
+    var sections = selectSections(all, typeDef.sourceKeywords.concat(getAudience(audience).keywords), SOURCE_PROMPT_CHARS,
+      topicKeywords(topic).concat(audience === 'CP' ? getAudience('CP').keywords : []));
+    var catalog = typeDef.requiresCatalog ? await ensureCatalog(audience) : [];
+    var categories = typeDef.categoriesByAudience ? typeDef.categoriesByAudience[audience] : typeDef.categories;
     var active = activeScenarios(scenarios || []);
     var category = opts.category || null;
-    if (!category && !topic && typeDef.categories) {
-      category = typeDef.categories[active.length % typeDef.categories.length];
+    if (!category && !topic && categories) {
+      category = categories[active.length % categories.length];
     }
     return {
       drill: drill,
       topic: topic,
+      audience: audience,
       today: clock.today(),
       difficulty: opts.difficulty || drill.config.difficulty,
       sections: sections,
@@ -1907,15 +1965,20 @@ function createDrillService(deps) {
       }
       var count = parseInt(input.scenarioCount, 10) || typeDef.defaults.scenarioCount;
       var topic = String(input.topic || '').trim().slice(0, 80);
+      var audience = getAudience(input.audience).id;
+      if ((typeDef.audiences || ['CUSTOMER']).indexOf(audience) === -1) {
+        throw ServiceError('WRONG_SIDE', typeDef.name + ' drills are for ' + (typeDef.audiences || ['CUSTOMER']).map(function (a) { return getAudience(a).short; }).join(' or ') + ' agents only.');
+      }
       var drill = {
         drillId: drillId, drillType: typeDef.type, drillDate: today,
-        title: input.title || (topic ? typeDef.name + ' · ' + topic : typeDef.name),
+        title: input.title || [typeDef.name, audience === 'CP' ? 'CP side' : null, topic || null].filter(Boolean).join(' · '),
         status: DrillStatus.DRAFT,
         config: {
           scenarioCount: Math.max(1, Math.min(count, 25)),
           difficulty: DIFFICULTY_GUIDANCE[input.difficulty] ? input.difficulty : typeDef.defaults.difficulty,
           targetMinutes: parseInt(input.targetMinutes, 10) || typeDef.defaults.targetMinutes,
-          topic: topic
+          topic: topic,
+          audience: audience
         },
         nextScenarioSeq: 1,
         createdAt: now(), createdBy: actor, updatedAt: now(),
@@ -1932,7 +1995,7 @@ function createDrillService(deps) {
     return drills.sort(function (a, b) { return a.createdAt < b.createdAt ? 1 : -1; }).map(function (d) {
       return {
         drillId: d.drillId, drillType: d.drillType, title: d.title, status: d.status, createdAt: d.createdAt,
-        drillDate: d.drillDate, scenarioCount: d.config.scenarioCount, topic: d.config.topic || '',
+        drillDate: d.drillDate, scenarioCount: d.config.scenarioCount, topic: d.config.topic || '', audience: d.config.audience || 'CUSTOMER',
         formStatus: d.form ? d.form.state : 'NONE', formUrl: d.form && d.form.publishedUrl,
         submissions: d.responseStats ? d.responseStats.responses : 0,
         trainees: d.responseStats ? d.responseStats.trainees : 0,
@@ -2616,33 +2679,36 @@ function createDrillService(deps) {
 
   // Triage answer choices come from documented processes. Entries backed by a quote that
   // is really in the sources are used automatically; unbacked ones are dropped.
-  async function ensureCatalog() {
-    var approved = await approvedCatalog();
+  async function ensureCatalog(audience) {
+    audience = audience || 'CUSTOMER';
+    var approved = await approvedCatalog(audience);
     // Entries saved before short process names were introduced are rebuilt once.
     var current = approved.filter(function (e) { return e.nameVersion === PROCESS_NAME_VERSION; });
     if (current.length >= 2 && current.length === approved.length) return approved;
-    await proposeCatalog();
-    approved = await approvedCatalog();
+    await proposeCatalog(audience);
+    approved = await approvedCatalog(audience);
     if (approved.length < 2) {
-      throw ServiceError('CATALOG_REQUIRED', 'Could not find at least two documented triage processes in the sources. Refresh sources and try again.');
+      throw ServiceError('CATALOG_REQUIRED', 'Could not find at least two documented ' + getAudience(audience).short + ' triage processes in the sources. Refresh sources and try again.');
     }
     return approved;
   }
 
-  async function proposeCatalog() {
-    var sections = selectSections(await getAllSections(), TRIAGE_TYPE.sourceKeywords, SOURCE_PROMPT_CHARS);
-    var entries = await proposeCatalogEntries(TRIAGE_TYPE, sections, llm);
+  async function proposeCatalog(audience) {
+    audience = getAudience(audience).id;
+    var sections = selectSections(await getAllSections(), TRIAGE_TYPE.sourceKeywords, SOURCE_PROMPT_CHARS,
+      audience === 'CP' ? getAudience('CP').keywords : []);
+    var entries = await proposeCatalogEntries(TRIAGE_TYPE, sections, llm, audience);
     var saved = [];
     var keepIds = {};
     for (var i = 0; i < entries.length; i++) {
       var e = entries[i];
-      var id = 'PROC-' + hashString(normalizeText(e.name)).slice(0, 6).toUpperCase();
+      var id = 'PROC-' + (audience === 'CP' ? 'CP-' : '') + hashString(normalizeText(e.name)).slice(0, 6).toUpperCase();
       if (keepIds[id]) continue;
       keepIds[id] = true;
       var verified = (e.sources || []).some(function (x) { return x.verified; });
       var doc = Object.assign({ catalogId: id, proposedAt: now(), proposedBy: actor }, e, {
         status: verified ? 'APPROVED' : 'REJECTED', approvedBy: verified ? 'auto (verified quote)' : null,
-        nameVersion: PROCESS_NAME_VERSION
+        nameVersion: PROCESS_NAME_VERSION, audience: audience
       });
       await store.put(COLLECTIONS.catalog, id, doc);
       saved.push(doc);
@@ -2651,7 +2717,7 @@ function createDrillService(deps) {
     if (saved.some(function (d) { return d.status === 'APPROVED'; })) {
       var all = await store.list(COLLECTIONS.catalog);
       for (var j = 0; j < all.length; j++) {
-        if (!keepIds[all[j].catalogId] && all[j].status === 'APPROVED') {
+        if (!keepIds[all[j].catalogId] && all[j].status === 'APPROVED' && (all[j].audience || 'CUSTOMER') === audience) {
           all[j].status = 'REPLACED';
           all[j].replacedAt = now();
           await store.put(COLLECTIONS.catalog, all[j].catalogId, all[j]);
@@ -2924,7 +2990,7 @@ var S = {
   view: 'today', drillId: null, tab: 'scenarios',
   drills: [], bundle: null, settings: null, report: null, reportType: '',
   catalog: [], sections: null, sourceFilter: '', sourceSummary: null, sourceRun: null,
-  editing: {}, confirmRemove: null, confirmDelete: null, respTrainee: '',
+  editing: {}, confirmRemove: null, confirmDelete: null, respTrainee: '', ndSide: 'CUSTOMER',
   busy: null, error: null, ready: false, fatal: null,
   caps: { db: false, sample: false, mcp: false, user: false }, canWrite: null, actor: 'unknown', names: {}
 };
@@ -3140,9 +3206,9 @@ async function startToday() {
   if (S.caps.sample) generateAll(d.drillId);
 }
 
-function topicOptions() {
+function topicOptions(side) {
   var lib = libraryTopics(S.sections || []);
-  var presetLabels = TOPIC_PRESETS.map(function (p) { return p.label; });
+  var presetLabels = topicPresetsFor(side).map(function (p) { return p.label; });
   return { presets: presetLabels, library: lib.filter(function (t) { return presetLabels.indexOf(t) === -1; }) };
 }
 
@@ -3153,8 +3219,11 @@ function chosenTopic() {
 }
 
 function viewNewDrill() {
-  var types = listDrillTypeSummaries();
-  var opts = topicOptions();
+  var side = S.ndSide;
+  var types = listDrillTypeSummaries().filter(function (t) { return t.audiences.indexOf(side) !== -1; });
+  var opts = topicOptions(side);
+  var sideSel = h('select', { id: 'nd-side', onchange: function () { S.ndSide = val('nd-side'); render(); } },
+    AUDIENCES.map(function (a) { return h('option', { value: a.id, selected: a.id === side }, a.label); }));
   var sel = h('select', { id: 'nd-type', onchange: function () {
     var t = types.filter(function (x) { return x.type === val('nd-type'); })[0];
     document.getElementById('nd-count').value = t.defaults.scenarioCount;
@@ -3172,7 +3241,9 @@ function viewNewDrill() {
     h('option', { value: '__other' }, 'Other (type your own)\u2026'));
   return h('section', { class: 'panel' },
     h('h2', null, 'New drill'),
+    side === 'CP' ? h('p', { class: 'small muted' }, 'CP side tickets come from cleaner partners. Approve or Deny is C-side only.') : null,
     h('div', { class: 'fields' },
+      field('Agent side', sideSel),
       field('Drill type', sel),
       field('Topic', topic),
       h('label', { class: 'field', id: 'nd-topic-other-wrap', hidden: true }, h('span', { class: 'label' }, 'Your topic'), h('input', { id: 'nd-topic-other', placeholder: 'e.g. Pause requests' })),
@@ -3181,7 +3252,7 @@ function viewNewDrill() {
       field('Minutes', h('input', { id: 'nd-min', type: 'number', min: '1', value: String(types[0].defaults.targetMinutes) }))
     ),
     h('div', { class: 'row' }, btn('Create and generate', async function () {
-      var input = { drillType: val('nd-type'), topic: chosenTopic(), scenarioCount: val('nd-count'), difficulty: val('nd-diff'), targetMinutes: val('nd-min') };
+      var input = { drillType: val('nd-type'), audience: side, topic: chosenTopic(), scenarioCount: val('nd-count'), difficulty: val('nd-diff'), targetMinutes: val('nd-min') };
       if (val('nd-topic') === '__other' && !input.topic) { S.error = 'Type a topic, or pick one from the list.'; render(); return; }
       var d = await act('Creating drill', function () { return svc.createDrill(input); });
       if (!d) return;
@@ -3200,11 +3271,12 @@ function viewDrills() {
   return h('section', { class: 'panel' },
     h('h2', null, 'Drills'),
     h('div', { class: 'table-wrap' }, h('table', null,
-      h('thead', null, h('tr', null, ['Drill ID', 'Type', 'Topic', 'Created', 'Tickets', 'Google Form', 'Submissions', 'Status', ''].map(function (c) { return h('th', null, c); }))),
+      h('thead', null, h('tr', null, ['Drill ID', 'Type', 'Side', 'Topic', 'Created', 'Tickets', 'Google Form', 'Submissions', 'Status', ''].map(function (c) { return h('th', null, c); }))),
       h('tbody', null, S.drills.map(function (d) {
         return h('tr', { class: 'click', tabindex: '0', onclick: function () { openDrill(d.drillId); }, onkeydown: function (e) { if (e.key === 'Enter') openDrill(d.drillId); } },
           h('td', { class: 'mono' }, d.drillId),
           h('td', null, getDrillType(d.drillType).name),
+          h('td', null, getAudience(d.audience).short),
           h('td', null, d.topic || h('span', { class: 'muted' }, 'Mixed')),
           h('td', null, fmtDate(d.createdAt)),
           h('td', null, String(d.scenarioCount)),
@@ -3273,7 +3345,7 @@ function viewDrill() {
         h('div', { class: 'stack', style: 'gap:4px' },
           h('span', { class: 'mono muted' }, d.drillId),
           h('h2', null, d.title),
-          h('span', { class: 'muted small' }, [typeDef.name, d.config.topic || 'Mixed topics', d.config.scenarioCount + ' tickets', d.config.targetMinutes + ' min', d.config.difficulty.toLowerCase()].join(' \u00B7 '))),
+          h('span', { class: 'muted small' }, [typeDef.name, getAudience(d.config.audience).short, d.config.topic || 'Mixed topics', d.config.scenarioCount + ' tickets', d.config.targetMinutes + ' min', d.config.difficulty.toLowerCase()].join(' \u00B7 '))),
         statusPill(d.status)),
       h('div', { class: 'stepper', 'aria-label': 'Drill lifecycle' }, STEPS.map(function (s, i) {
         return h('span', { class: i < idx ? 'done' : i === idx ? 'now' : '' }, STEP_LABEL[s]);
@@ -3686,16 +3758,20 @@ function viewSources() {
 }
 
 function viewCatalog() {
-  var entries = S.catalog.filter(function (e) { return e.status === 'APPROVED'; }).sort(function (a, b) { return a.name < b.name ? -1 : 1; });
-  return h('section', { class: 'panel' },
-    h('div', { class: 'row spread' }, h('h2', null, 'Triage processes'),
-      btn('Rebuild from sources', function () { act('Finding documented processes', async function () { await svc.proposeCatalog(); S.catalog = await svc.listCatalog(); }); }, { disabled: !S.caps.sample })),
-    h('p', { class: 'muted small' }, 'Answer choices for Triage drills. Built automatically from processes the sources spell out.'),
-    entries.length ? h('div', { class: 'table-wrap' }, h('table', null,
-      h('thead', null, h('tr', null, h('th', null, 'Process'), h('th', null, 'Tag'), h('th', null, 'Checklist'))),
-      h('tbody', null, entries.map(function (e) {
-        return h('tr', null, h('td', null, e.name, e.sourceTitle && e.sourceTitle !== e.name ? h('div', { class: 'small muted' }, 'Library: ' + e.sourceTitle) : null), h('td', null, e.tag || h('span', { class: 'muted' }, '\u2014')), h('td', null, e.checklist || h('span', { class: 'muted' }, '\u2014')));
-      })))) : h('p', { class: 'muted small' }, 'Built the first time you create a Triage drill.'));
+  return h('div', { class: 'stack' }, AUDIENCES.map(function (a) {
+    var entries = S.catalog.filter(function (e) { return e.status === 'APPROVED' && (e.audience || 'CUSTOMER') === a.id; })
+      .sort(function (x, y) { return x.name < y.name ? -1 : 1; });
+    return h('section', { class: 'panel' },
+      h('div', { class: 'row spread' }, h('h2', null, 'Triage processes \u00B7 ' + a.short),
+        btn('Rebuild from sources', function () { act('Finding documented ' + a.short + ' processes', async function () { await svc.proposeCatalog(a.id); S.catalog = await svc.listCatalog(); }); }, { disabled: !S.caps.sample })),
+      h('p', { class: 'muted small' }, 'Answer choices for ' + a.short + ' Triage drills, built automatically from processes the sources spell out.'),
+      entries.length ? h('div', { class: 'table-wrap' }, h('table', null,
+        h('thead', null, h('tr', null, h('th', null, 'Process'), h('th', null, 'Tag'), h('th', null, 'Checklist'))),
+        h('tbody', null, entries.map(function (e) {
+          return h('tr', null, h('td', null, e.name, e.sourceTitle && e.sourceTitle !== e.name ? h('div', { class: 'small muted' }, 'Library: ' + e.sourceTitle) : null),
+            h('td', null, e.tag || h('span', { class: 'muted' }, '\u2014')), h('td', null, e.checklist || h('span', { class: 'muted' }, '\u2014')));
+        })))) : h('p', { class: 'muted small' }, 'Built the first time you create a ' + a.short + ' Triage drill.'));
+  }));
 }
 
 // ---------------------------------------------------------------- Settings

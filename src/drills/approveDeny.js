@@ -11,6 +11,7 @@ var APPROVE_DENY_TYPE = {
   cadence: 'DAILY',
   defaults: { scenarioCount: 5, targetMinutes: 15, difficulty: 'HARD' },
   requiresCatalog: false,
+  audiences: ['CUSTOMER'],
   sourceKeywords: [
     'free month', 'mf reduction', 'membership fee', 'etf', 'early termination', 'waiver', 'waive',
     'retention', 'retain', 'cancel', 'cancellation', 'membership', 'forever clean', 'downgrade', 'pause'

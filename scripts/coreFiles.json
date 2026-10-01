@@ -6,6 +6,7 @@
   "src/core/grounding.js",
   "src/core/jsonCheck.js",
   "src/core/topics.js",
+  "src/core/audience.js",
   "src/core/readability.js",
   "src/drills/approveDeny.js",
   "src/drills/triage.js",

@@ -9,7 +9,7 @@ var GENERATOR_SYSTEM_PROMPT = [
   'For every claim in the answer key add a citation: the source id and a short quote copied word for word from that source. Never paraphrase inside a quote.',
   'If the Knowledge Library and a Slack message disagree, follow the more recent clarification and describe the disagreement in sourceConflict; otherwise leave sourceConflict empty.',
   'If the sources do not clearly give the correct answer, write a different ticket that they do cover. If none is possible, set insufficientSource to true and say what is missing in insufficientReason. Never invent a policy.',
-  'STYLE. Write like a real customer: short, plain, everyday words (easy for a new hire to read). Title: 3 to 6 words. Ticket: 2 to 4 short sentences, under 80 words. No long backstory.',
+  'STYLE. Write like the real sender (a customer or a cleaner partner, as the prompt says): short, plain, everyday words (easy for a new hire to read). Title: 3 to 6 words. Ticket: 2 to 4 short sentences, under 80 words. No long backstory.',
   'Account details: 3 to 6 short label/value pairs, each value a few words (for example "Plan: FCF $19/month", "Last cleaning: Sep 22, 2026"). Include only facts an agent would check, plus at most one that does not matter.',
   'DATES. Use current dates. Every date must be within the last 12 months of today (scheduled cleanings may be up to 2 months ahead). Write dates like "Sep 22, 2026".',
   'Do not state the answer, name the policy, or hint at "the correct action" in the ticket or account details.',
@@ -20,6 +20,7 @@ var GENERATOR_SYSTEM_PROMPT = [
 function buildGenerationPrompt(typeDef, ctx) {
   var parts = [];
   parts.push('Today is ' + humanDate(ctx.today) + '.');
+  parts.push('AGENT SIDE: ' + getAudience(ctx.audience).short + '. The ticket is from ' + getAudience(ctx.audience).sender + '.');
   if (ctx.topic) parts.push('TOPIC: every ticket in this drill must be about "' + ctx.topic + '". Use the sources about this topic.');
   parts.push(typeDef.promptGuidance(ctx));
   parts.push('Difficulty: ' + ctx.difficulty + ' — ' + (DIFFICULTY_GUIDANCE[ctx.difficulty] || ''));
@@ -133,12 +134,12 @@ function recomputeContentFlags(scenario) {
   return scenario;
 }
 
-async function proposeCatalogEntries(typeDef, sections, llm) {
+async function proposeCatalogEntries(typeDef, sections, llm, audienceId) {
   if (!sections.length) throw ServiceError('NO_SOURCE_MATERIAL', 'No source sections matched the triage keywords. Refresh sources first.');
-  var schema = typeDef.catalogOutputSchema();
+  var schema = typeDef.catalogOutputSchema(audienceId);
   var out = await llm.generateJson({
     system: GENERATOR_SYSTEM_PROMPT,
-    user: typeDef.catalogPromptGuidance() + '\n\nApproved sources:\n\n' + formatSectionsForPrompt(sections),
+    user: typeDef.catalogPromptGuidance(audienceId) + '\n\nApproved sources:\n\n' + formatSectionsForPrompt(sections),
     schema: schema
   });
   var problems = checkJsonAgainstSchema(out, schema);

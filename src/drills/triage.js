@@ -6,6 +6,14 @@
 // by a trainer before any triage drill can be generated.
 
 var TRIAGE_CATEGORIES = ['Unused-voucher issue', 'Lock-out refund', 'Voucher refund', 'General retention'];
+var TRIAGE_CATEGORIES_BY_AUDIENCE = {
+  CUSTOMER: TRIAGE_CATEGORIES,
+  CP: ['CP lockout', 'Payout issue', 'Job claim or cancellation', 'Account or deactivation']
+};
+
+function triageCategories(audienceId) {
+  return TRIAGE_CATEGORIES_BY_AUDIENCE[audienceId] || TRIAGE_CATEGORIES;
+}
 
 var TRIAGE_TYPE = {
   type: 'TRIAGE',
@@ -17,6 +25,8 @@ var TRIAGE_TYPE = {
   defaults: { scenarioCount: 8, targetMinutes: 30, difficulty: 'MEDIUM' },
   requiresCatalog: true,
   categories: TRIAGE_CATEGORIES,
+  categoriesByAudience: TRIAGE_CATEGORIES_BY_AUDIENCE,
+  audiences: ['CUSTOMER', 'CP'],
   sourceKeywords: [
     'unused voucher', 'voucher', 'lock-out', 'lockout', 'locked out', 'refund', 'retention',
     'checklist', 'interactive checklist', 'tag', 'process', 'macro', 'workflow', 'triage'
@@ -68,7 +78,7 @@ var TRIAGE_TYPE = {
     return [
       'Drill: "Triage-Only". The trainee does not reply to the customer; they only pick the process, tag and checklist.',
       'Approved process catalog (the ONLY valid answers):\n' + list,
-      'correctProcessId must be one of the catalog ids above. Ticket category should be: ' + (ctx.category || 'any of ' + TRIAGE_CATEGORIES.join(', ')) + '.',
+      'correctProcessId must be one of the catalog ids above. Ticket category should be: ' + (ctx.category || 'any of ' + triageCategories(ctx.audience).join(', ')) + '.',
       'Write the ticket so that surface keywords point toward a plausible but wrong process at least some of the time; the account facts must decide it.',
       'requiredAccountDetail is the single fact that determines the process.'
     ].join('\n\n');
@@ -77,7 +87,7 @@ var TRIAGE_TYPE = {
   outputSchema: function (ctx) {
     var schema = commonScenarioOutputSchema();
     var ids = (ctx.catalog || []).map(function (c) { return c.catalogId; });
-    schema.properties.category = { type: 'string', enum: TRIAGE_CATEGORIES };
+    schema.properties.category = { type: 'string', enum: triageCategories(ctx.audience) };
     schema.properties.correctProcessId = ids.length ? { type: 'string', enum: ids } : { type: 'string' };
     schema.properties.requiredAccountDetail = { type: 'string' };
     schema.required.push('category', 'correctProcessId', 'requiredAccountDetail');
@@ -112,9 +122,10 @@ var TRIAGE_TYPE = {
     };
   },
 
-  catalogPromptGuidance: function () {
+  catalogPromptGuidance: function (audienceId) {
     return [
-      'Extract the list of documented ticket-handling processes relevant to these categories: ' + TRIAGE_CATEGORIES.join(', ') + '.',
+      'Extract the list of documented ticket-handling processes ' + (audienceId === 'CP' ? 'that CP-side agents use for tickets from cleaner partners (CPs)' : 'that C-side agents use for customer tickets') +
+        ', relevant to these categories: ' + triageCategories(audienceId).join(', ') + '. ',
       'For each process give: name = a short label of 2 to 5 key words taken from the source heading, dropping filler such as "Process guide", "How to", "if C wants" ',
       '(example: "Process Guide if C wants a Groupon Voucher refunded" becomes "Groupon voucher refund"); sourceTitle = the heading exactly as written in the source; ',
       'the exact tag to apply (empty string if the source does not name one); the exact interactive checklist/process to launch (empty string if not documented); ',
@@ -123,7 +134,7 @@ var TRIAGE_TYPE = {
     ].join('');
   },
 
-  catalogOutputSchema: function () {
+  catalogOutputSchema: function (audienceId) {
     return {
       type: 'object', additionalProperties: false,
       properties: {
@@ -133,7 +144,7 @@ var TRIAGE_TYPE = {
             type: 'object', additionalProperties: false,
             properties: {
               name: { type: 'string' }, sourceTitle: { type: 'string' }, tag: { type: 'string' }, checklist: { type: 'string' },
-              category: { type: 'string', enum: TRIAGE_CATEGORIES }, whenToUse: { type: 'string' },
+              category: { type: 'string', enum: triageCategories(audienceId) }, whenToUse: { type: 'string' },
               citations: {
                 type: 'array',
                 items: {

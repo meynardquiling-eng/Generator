@@ -135,7 +135,11 @@ const FIXTURE_SECTIONS = [
   { sectionId: 'KL-tri-1', sourceType: 'KNOWLEDGE_LIBRARY', title: 'Fixture Library', heading: 'Triage > Lock-out refund', path: 'Triage > Lock-out refund', url: 'https://docs.example/tri1',
     text: 'FIXTURE: Lock-out refund tickets use the Lockout Refund process, tag lockout_refund, and launch the Lockout Checklist.' },
   { sectionId: 'KL-tri-2', sourceType: 'KNOWLEDGE_LIBRARY', title: 'Fixture Library', heading: 'Triage > Unused voucher', path: 'Triage > Unused voucher', url: 'https://docs.example/tri2',
-    text: 'FIXTURE: Unused voucher questions use the Unused Voucher process, tag unused_voucher, and launch the Voucher Checklist.' }
+    text: 'FIXTURE: Unused voucher questions use the Unused Voucher process, tag unused_voucher, and launch the Voucher Checklist.' },
+  { sectionId: 'KL-cp-1', sourceType: 'KNOWLEDGE_LIBRARY', title: 'Fixture Library', heading: 'CP Support > Lockout', path: 'CP Support > Lockout', url: 'https://docs.example/cp1',
+    text: 'FIXTURE: When a CP is locked out at a job, use the CP Lockout Pay process and tag cp_lockout.' },
+  { sectionId: 'KL-cp-2', sourceType: 'KNOWLEDGE_LIBRARY', title: 'Fixture Library', heading: 'CP Support > Payouts', path: 'CP Support > Payouts', url: 'https://docs.example/cp2',
+    text: 'FIXTURE: If a CP payout did not arrive, use the Missing Payout process and tag payout_missing.' }
 ];
 
 // Deterministic stand-in for Claude. Reads the prompt, cites a quote that really exists
@@ -153,6 +157,15 @@ class FakeLlm {
     const first = ids[0];
     const quote = first ? first.text.slice(10, 70) : 'nothing';
     if (schema.properties.entries) {
+      const cats = schema.properties.entries.items.properties.category.enum;
+      if (cats[0] === 'CP lockout') {
+        return { entries: [
+          { name: 'CP Lockout Pay', sourceTitle: 'CP lockout', tag: 'cp_lockout', checklist: 'CP Lockout Checklist', category: 'CP lockout', whenToUse: 'CP could not enter.',
+            citations: [{ sectionId: 'KL-cp-1', quote: 'use the CP Lockout Pay process', supports: 'process' }] },
+          { name: 'Missing Payout', sourceTitle: 'Missing payout', tag: 'payout_missing', checklist: 'Payout Checklist', category: 'Payout issue', whenToUse: 'Payout not received.',
+            citations: [{ sectionId: 'KL-cp-2', quote: 'use the Missing Payout process', supports: 'process' }] }
+        ] };
+      }
       return {
         entries: [
           { name: 'Lockout Refund', sourceTitle: 'Lock-out refund', tag: 'lockout_refund', checklist: 'Lockout Checklist', category: 'Lock-out refund', whenToUse: 'Cleaner could not get in.',
@@ -181,7 +194,7 @@ class FakeLlm {
       out = Object.assign(base, { correctActions: ['Free month'], requiredAccountDetail: 'Completed cleanings: ' + (2 + n) });
     } else {
       const cat = schema.properties.correctProcessId.enum || [];
-      out = Object.assign(base, { category: 'Lock-out refund', correctProcessId: cat[0], requiredAccountDetail: 'Cleaner could not enter' });
+      out = Object.assign(base, { category: schema.properties.category.enum[0], correctProcessId: cat[0], requiredAccountDetail: 'Cleaner could not enter' });
     }
     const o = this.overrides.shift();
     return o ? o(out) : out;

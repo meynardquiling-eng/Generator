@@ -119,6 +119,8 @@ tr.click:hover td { background: var(--sunk); }
 .notice { padding: 10px 12px; border-radius: var(--r); background: var(--accent-soft); }
 .notice.bad { background: var(--bad-soft); }
 .notice.warn { background: var(--warn-soft); }
+.busybar { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 56px); z-index: 4; max-width: 1148px; margin: 12px auto 0; padding: 8px 12px; border-radius: var(--r); background: var(--accent-soft); color: var(--ink); width: calc(100% - 32px); }
+body.is-busy button.btn { pointer-events: none; opacity: 0.5; }
 .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(16px + env(safe-area-inset-bottom, 0px)); background: var(--ink); color: var(--bg); padding: 8px 14px; border-radius: var(--r); max-width: calc(100% - 32px); z-index: 10; }
 .formprev { background: var(--sunk); border-radius: var(--r); padding: 16px; display: grid; gap: 12px; }
 .formprev .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); padding: 14px; display: grid; gap: 8px; }
@@ -134,6 +136,7 @@ details summary { cursor: pointer; }
     <nav class="tabs" id="nav" aria-label="Sections"></nav>
   </div>
 </header>
+<div id="busy" class="busybar" role="status" hidden></div>
 <main id="app">
   <section class="panel">
     <h2>Loading the trainer dashboard…</h2>

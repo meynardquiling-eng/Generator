@@ -43,7 +43,7 @@ function append(el, kid) {
 function pill(text, kind) { return h('span', { class: 'pill' + (kind ? ' ' + kind : '') }, text); }
 function btn(label, onClick, opts) {
   opts = opts || {};
-  return h('button', { class: 'btn' + (opts.primary ? ' primary' : '') + (opts.danger ? ' danger' : ''), type: 'button', disabled: !!S.busy || opts.disabled || (opts.write !== false && S.canWrite === false), onclick: onClick, title: opts.title }, label);
+  return h('button', { class: 'btn' + (opts.primary ? ' primary' : '') + (opts.danger ? ' danger' : ''), type: 'button', disabled: opts.disabled || (opts.write !== false && S.canWrite === false), onclick: onClick, title: opts.title }, label);
 }
 function field(label, input) { return h('label', { class: 'field' }, h('span', { class: 'label' }, label), input); }
 function val(id) { var el = document.getElementById(id); return el ? el.value : ''; }
@@ -66,11 +66,20 @@ function toast(msg) {
   toast._t = setTimeout(function () { t.hidden = true; }, 3500);
 }
 
+// Shows the busy state without re-rendering the page, so form values the action is
+// about to read are still on screen.
+function showBusy() {
+  var bar = document.getElementById('busy');
+  bar.textContent = S.busy ? S.busy + '…' : '';
+  bar.hidden = !S.busy;
+  document.body.classList.toggle('is-busy', !!S.busy);
+}
+
 async function act(label, fn, okMsg) {
   if (S.busy) return null;
   S.busy = label;
   S.error = null;
-  render();
+  showBusy();
   try {
     var r = await fn();
     if (okMsg) toast(typeof okMsg === 'function' ? okMsg(r) : okMsg);
@@ -138,6 +147,7 @@ function render() {
     var current = S.view === v[0] || (v[0] === 'drills' && S.view === 'drill');
     return h('button', { type: 'button', 'aria-current': current ? 'page' : null, onclick: function () { go(v[0]); } }, v[1]);
   }));
+  showBusy();
   var app = document.getElementById('app');
   var kids = [];
   if (S.fatal) {
@@ -146,7 +156,6 @@ function render() {
   }
   if (!S.ready) return;
   if (S.canWrite === false) kids.push(h('div', { class: 'notice warn' }, 'You have view-only access. Ask the dashboard owner for Contributor access to generate, edit or score drills.'));
-  if (S.busy) kids.push(h('div', { class: 'notice' }, S.busy + '…'));
   if (S.error) kids.push(h('div', { class: 'notice bad row spread' }, h('span', null, S.error), btn('Dismiss', function () { S.error = null; render(); }, { write: false })));
   var view = { today: viewToday, drills: viewDrills, drill: viewDrill, coaching: viewCoaching, sources: viewSources, settings: viewSettings }[S.view];
   kids.push(view());
@@ -254,7 +263,7 @@ async function generateAll(drillId) {
       if (active >= b.drill.config.scenarioCount) break;
       S.busy = 'Generating scenario ' + (active + 1) + ' of ' + b.drill.config.scenarioCount + ' (each takes up to a minute)';
       S.error = null;
-      render();
+      showBusy();
       await svc.generateNextScenario(drillId);
       S.bundle = await svc.getDrillBundle(drillId);
     }

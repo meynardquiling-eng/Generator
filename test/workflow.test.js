@@ -444,3 +444,17 @@ test('response export from the sheet fallback maps by header tags', async () => 
   assert.equal(resp.traineeEmail, 'c@x.com');
   assert.equal(resp.answers['AD-001/action'].score.autoScore, 2);
 });
+
+test('missing source export reports the bridge status, and a real export imports', async () => {
+  const env = await setup();
+  let r = await env.svc.importSources();
+  assert.equal(r.status, 'NO_EXPORT_YET');
+  assert.equal(r.bridge, null);
+  env.bridge.status = { finishedAt: 'x', steps: { sources: 'error: no permission' } };
+  r = await env.svc.importSources();
+  assert.match(r.bridge.steps.sources, /no permission/);
+  env.bridge.sourceExport = { generatedAt: 'g', docId: 'd', sections: [{ sectionId: 'KL-a', sourceType: 'KNOWLEDGE_LIBRARY', path: 'A', text: 'Some text' }] };
+  r = await env.svc.importSources();
+  assert.equal(r.status, 'OK');
+  assert.equal(r.sections, 1);
+});

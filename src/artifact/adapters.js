@@ -112,6 +112,7 @@ function makeDriveBridge(mcp) {
       await writeNew(folderId, 'drill-sources-request__' + Date.now() + '.json', { kind: 'SOURCE_REQUEST', docId: docId, requestedAt: new Date().toISOString() });
       return { requested: true };
     },
+    getBridgeStatus: function (folderId) { return readJson(folderId, 'drill-bridge__status.json'); },
     async getSourceExport(folderId) {
       var index = await readJson(folderId, 'drill-sources__index.json');
       if (!index) return null;

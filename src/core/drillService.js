@@ -762,7 +762,10 @@ function createDrillService(deps) {
   async function importSources() {
     var settings = await requireFolder();
     var exp = await bridge.getSourceExport(settings.bridgeFolderId);
-    if (!exp || !exp.sections) return { status: 'NO_EXPORT_YET' };
+    if (!exp || !exp.sections) {
+      var bridgeStatus = bridge.getBridgeStatus ? await bridge.getBridgeStatus(settings.bridgeFolderId) : null;
+      return { status: 'NO_EXPORT_YET', bridge: bridgeStatus };
+    }
     var sections = exp.sections.filter(function (s) { return !isBlank(s.text) && !isBlank(s.sectionId); });
     if (!sections.length) throw ServiceError('EMPTY_SOURCE', 'The source export contained no text sections. Nothing was replaced.');
     var chunks = [];

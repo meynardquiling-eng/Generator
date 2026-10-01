@@ -41,15 +41,26 @@ function setupBridge() {
   return folderId;
 }
 
+var BRIDGE_VERSION = 2;
+
 function runBridge() {
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(10000)) return;
+  var folder = DriveApp.getFolderById(PropertiesService.getScriptProperties().getProperty(FOLDER_PROP));
+  var status = { bridgeVersion: BRIDGE_VERSION, startedAt: new Date().toISOString(), steps: {} };
   try {
-    var folder = DriveApp.getFolderById(PropertiesService.getScriptProperties().getProperty(FOLDER_PROP));
-    processFormRequests_(folder);
-    exportAllResponses_(folder);
-    processSourceRequests_(folder);
+    [['forms', processFormRequests_], ['responses', exportAllResponses_], ['sources', processSourceRequests_]].forEach(function (step) {
+      try {
+        step[1](folder);
+        status.steps[step[0]] = 'ok';
+      } catch (e) {
+        status.steps[step[0]] = 'error: ' + String(e && e.message || e);
+      }
+    });
   } finally {
+    // The dashboard reads this to explain a missing export or form.
+    status.finishedAt = new Date().toISOString();
+    try { writeJson_(folder, 'drill-bridge__status.json', status); } catch (e) { /* folder unavailable */ }
     lock.releaseLock();
   }
 }

@@ -82,7 +82,8 @@ async function act(label, fn, okMsg) {
   showBusy();
   try {
     var r = await fn();
-    if (okMsg) toast(typeof okMsg === 'function' ? okMsg(r) : okMsg);
+    var msg = typeof okMsg === 'function' ? okMsg(r) : okMsg;
+    if (msg) toast(msg);
     return r;
   } catch (e) {
     S.error = errorText(e);
@@ -674,7 +675,12 @@ function viewSources() {
       meta ? h('p', { class: 'small' }, meta.sections + ' sections from the export of ' + fmtDate(meta.generatedAt) + ', imported ' + fmtDate(meta.importedAt) + ' by ' + who(meta.importedBy) + '.') : h('div', { class: 'notice warn' }, 'Not imported yet.'),
       h('div', { class: 'row' },
         btn('Ask the bridge for a fresh export', function () { act('Writing the export request', function () { return svc.requestSourceRefresh(); }, 'Requested. The bridge exports within about 5 minutes; then import it.'); }),
-        btn('Import latest export', function () { act('Importing source sections', async function () { var r = await svc.importSources(); await loadSettings(); S.sections = await svc.getAllSections(); return r; }, function (r) { return r && r.status === 'OK' ? r.sections + ' sections imported' : 'No export found yet.'; }); }, { primary: true })),
+        btn('Import latest export', function () { act('Importing source sections', async function () { var r = await svc.importSources(); await loadSettings(); S.sections = await svc.getAllSections(); return r; }, function (r) {
+          if (!r) return '';
+          if (r.status === 'OK') return r.sections + ' sections imported';
+          S.error = noExportReason(r.bridge);
+          return '';
+        }); }, { primary: true })),
       sections.length ? h('div', { class: 'stack' },
         h('input', { id: 'src-filter', placeholder: 'Search sections (e.g. ETF, free month, lock-out)', value: S.sourceFilter, onchange: function () { S.sourceFilter = val('src-filter'); render(); } }),
         h('p', { class: 'small muted' }, matches.length + ' of ' + sections.length + ' sections' + (matches.length > 40 ? ', showing 40' : '')),
@@ -706,6 +712,18 @@ function viewSources() {
           btn('Withdraw', function () { act('Withdrawing snippet', async function () { await svc.setSnippetStatus(sn.snippetId, 'REJECTED'); S.snippets = await svc.listSnippets(); S.sections = await svc.getAllSections(); }); }, { danger: true }));
       }) : h('p', { class: 'muted small' }, 'None approved yet.')),
     viewCatalog());
+}
+
+// Explains a missing source export from the bridge's own status file.
+function noExportReason(status) {
+  if (!status) {
+    return 'No export yet, and the Form Bridge has never reported a run. Update the bridge to the latest Code.js and appsscript.json, run runBridge once from the Apps Script editor (accept the new permissions), and check that a runBridge trigger exists under Triggers.';
+  }
+  var ran = fmtDate(status.finishedAt || status.startedAt);
+  if (status.steps && /^error/.test(status.steps.sources || '')) {
+    return 'The Form Bridge failed to export the Knowledge Library on its last run (' + ran + '): ' + status.steps.sources.replace(/^error: /, '');
+  }
+  return 'No export yet. The Form Bridge last ran ' + ran + '. If you just asked for an export, wait for its next run (every 5 minutes) and import again.';
 }
 
 function viewCatalog() {

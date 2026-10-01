@@ -116,6 +116,7 @@ class FakeBridge {
   async getResponses(folderId, drillId) { const f = this.files[`drillform-responses__${drillId}.json`]; return f ? clone(f.content) : null; }
   async requestSourceExport() { this.sourceRequested = true; return { requested: true }; }
   async getSourceExport() { return this.sourceExport ? clone(this.sourceExport) : null; }
+  async getBridgeStatus() { return this.status ? clone(this.status) : null; }
 }
 
 // TEST FIXTURE sections (invented wording, used only to exercise grounding).

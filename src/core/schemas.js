@@ -33,7 +33,8 @@ var COLLECTIONS = {
   responses: 'responses',    // <drillId>__<responseId>
   catalog: 'catalog',        // catalogId
   sources: 'sources',        // kl-000... Library chunks, slack-<channelId> CSQ channel pulls
-  settings: 'settings'       // 'main'
+  settings: 'settings',      // 'main'
+  deletedDrills: 'deletedDrills' // drillId; deleted IDs are never reused (the bridge keys forms by drill ID)
 };
 
 function scenarioDocId(drillId, scenarioId) {

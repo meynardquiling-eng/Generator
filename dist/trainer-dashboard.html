@@ -66,7 +66,7 @@ main { max-width: 1180px; margin: 0 auto; padding-inline: 16px; padding-block: 2
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); padding: 16px; display: grid; gap: 12px; min-width: 0; }
 .panel.flat { background: var(--sunk); border-color: transparent; }
 
-button.btn { font: inherit; font-weight: 500; border: 1px solid var(--line); background: var(--surface); color: var(--ink); padding: 6px 12px; border-radius: var(--r); cursor: pointer; }
+button.btn { white-space: nowrap; font: inherit; font-weight: 500; border: 1px solid var(--line); background: var(--surface); color: var(--ink); padding: 6px 12px; border-radius: var(--r); cursor: pointer; }
 button.btn:hover:not(:disabled) { border-color: var(--accent); }
 button.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--surface); }
 button.btn.danger { color: var(--bad); }
@@ -369,7 +369,8 @@ var COLLECTIONS = {
   responses: 'responses',    // <drillId>__<responseId>
   catalog: 'catalog',        // catalogId
   sources: 'sources',        // kl-000... Library chunks, slack-<channelId> CSQ channel pulls
-  settings: 'settings'       // 'main'
+  settings: 'settings',      // 'main'
+  deletedDrills: 'deletedDrills' // drillId; deleted IDs are never reused (the bridge keys forms by drill ID)
 };
 
 function scenarioDocId(drillId, scenarioId) {
@@ -1872,7 +1873,8 @@ function createDrillService(deps) {
     var typeDef = getDrillType(input.drillType);
     var today = clock.today();
     return withLock('new__' + typeDef.drillIdPrefix + '__' + today, async function () {
-      var sameDay = await store.list(COLLECTIONS.drills, ['drillDate', today]);
+      var sameDay = (await store.list(COLLECTIONS.drills, ['drillDate', today]))
+        .concat(await store.list(COLLECTIONS.deletedDrills, ['drillDate', today]));
       var drillId = makeDrillId(typeDef.drillIdPrefix, today, sameDay.map(function (d) { return d.drillId; }));
       while (await store.get(COLLECTIONS.drills, drillId)) {
         drillId = makeDrillId(typeDef.drillIdPrefix, today, sameDay.map(function (d) { return d.drillId; }).concat([drillId]));
@@ -2450,6 +2452,21 @@ function createDrillService(deps) {
     });
   }
 
+  // Removes the drill, its scenarios and its imported responses from the dashboard.
+  // A Google Form that was already created stays in Drive (the bridge folder).
+  async function deleteDrill(drillId) {
+    return withLock(drillId, async function () {
+      var drill = await getDrill(drillId);
+      var scenarios = await store.list(COLLECTIONS.scenarios, ['drillId', drillId]);
+      var responses = await store.list(COLLECTIONS.responses, ['drillId', drillId]);
+      for (var i = 0; i < responses.length; i++) await store.remove(COLLECTIONS.responses, responses[i].responseKey);
+      for (var j = 0; j < scenarios.length; j++) await store.remove(COLLECTIONS.scenarios, scenarioDocId(drillId, scenarios[j].scenarioId));
+      await store.put(COLLECTIONS.deletedDrills, drillId, { drillId: drillId, drillDate: drill.drillDate, formId: drill.form && drill.form.formId || null, deletedAt: now(), deletedBy: actor });
+      await store.remove(COLLECTIONS.drills, drillId);
+      return { drillId: drillId, scenarios: scenarios.length, responses: responses.length, formId: drill.form && drill.form.formId || null };
+    });
+  }
+
   async function coachingReport(filter) {
     filter = filter || {};
     var drills = await store.list(COLLECTIONS.drills);
@@ -2641,7 +2658,7 @@ function createDrillService(deps) {
 
   return {
     getSettings: getSettings, saveSettings: saveSettings,
-    createDrill: createDrill, listDrills: listDrills, getDrillBundle: getDrillBundle,
+    createDrill: createDrill, listDrills: listDrills, getDrillBundle: getDrillBundle, deleteDrill: deleteDrill,
     generateNextScenario: generateNextScenario, addManualScenario: addManualScenario,
     regenerateScenario: regenerateScenario, updateScenario: updateScenario, removeScenario: removeScenario,
     resolveFlag: resolveFlag, beginReview: beginReview, approveDrill: approveDrill, reopenForEdits: reopenForEdits,
@@ -2866,7 +2883,7 @@ var S = {
   view: 'today', drillId: null, tab: 'scenarios',
   drills: [], bundle: null, settings: null, report: null, reportType: '',
   catalog: [], sections: null, sourceFilter: '', sourceSummary: null, sourceRun: null,
-  editing: {}, confirmRemove: null, respTrainee: '',
+  editing: {}, confirmRemove: null, confirmDelete: null, respTrainee: '',
   busy: null, error: null, ready: false, fatal: null,
   caps: { db: false, sample: false, mcp: false, user: false }, canWrite: null, actor: 'unknown', names: {}
 };
@@ -3142,7 +3159,7 @@ function viewDrills() {
   return h('section', { class: 'panel' },
     h('h2', null, 'Drills'),
     h('div', { class: 'table-wrap' }, h('table', null,
-      h('thead', null, h('tr', null, ['Drill ID', 'Type', 'Topic', 'Created', 'Tickets', 'Google Form', 'Submissions', 'Status'].map(function (c) { return h('th', null, c); }))),
+      h('thead', null, h('tr', null, ['Drill ID', 'Type', 'Topic', 'Created', 'Tickets', 'Google Form', 'Submissions', 'Status', ''].map(function (c) { return h('th', null, c); }))),
       h('tbody', null, S.drills.map(function (d) {
         return h('tr', { class: 'click', tabindex: '0', onclick: function () { openDrill(d.drillId); }, onkeydown: function (e) { if (e.key === 'Enter') openDrill(d.drillId); } },
           h('td', { class: 'mono' }, d.drillId),
@@ -3152,10 +3169,29 @@ function viewDrills() {
           h('td', null, String(d.scenarioCount)),
           h('td', null, d.formStatus === 'NONE' ? h('span', { class: 'muted' }, 'Not created') : pill(d.formStatus === 'CREATED' ? 'Created' : 'Requested', d.formStatus === 'CREATED' ? 'accent' : 'warn')),
           h('td', null, d.submissions ? d.submissions + ' from ' + d.trainees + (d.pendingReview ? ' · ' + d.pendingReview + ' to score' : '') : '—'),
-          h('td', null, statusPill(d.status)));
+          h('td', null, statusPill(d.status)),
+          h('td', { onclick: function (e) { e.stopPropagation(); }, onkeydown: function (e) { e.stopPropagation(); } }, deleteControl(d)));
       }))
     ))
   );
+}
+
+// Two-step delete: the first click asks, the second deletes.
+function deleteControl(d) {
+  if (S.confirmDelete !== d.drillId) {
+    return btn('Delete', function () { S.confirmDelete = d.drillId; render(); }, { danger: true });
+  }
+  return h('div', { class: 'row', style: 'flex-wrap:nowrap' },
+    btn('Confirm delete', function () {
+      S.confirmDelete = null;
+      act('Deleting ' + d.drillId, async function () {
+        var r = await svc.deleteDrill(d.drillId);
+        if (S.drillId === d.drillId) { S.drillId = null; S.bundle = null; S.view = 'drills'; }
+        await loadDrills();
+        return r;
+      }, function (r) { return r ? 'Deleted ' + r.drillId + (r.formId ? '. Its Google Form is still in the bridge folder in Drive.' : '') : ''; });
+    }, { danger: true }),
+    btn('Cancel', function () { S.confirmDelete = null; render(); }, { write: false }));
 }
 
 // ---------------------------------------------------------------- Drill workspace
@@ -3238,6 +3274,8 @@ function drillActions(b, typeDef, active) {
     acts.push(btn('Complete drill', function () { act('Completing', async function () { await svc.completeDrill(id, false); await reload(); }, 'Drill completed.'); }));
   }
   if (d.status === 'COMPLETED') acts.push(btn('Reopen review', function () { act('Reopening review', async function () { await svc.reopenReview(id); await reload(); }); }));
+  acts.push(h('span', { style: 'flex:1' }));
+  acts.push(deleteControl(d));
   return h('div', { class: 'row' }, acts);
 }
 

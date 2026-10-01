@@ -165,7 +165,8 @@ function createDrillService(deps) {
     var typeDef = getDrillType(input.drillType);
     var today = clock.today();
     return withLock('new__' + typeDef.drillIdPrefix + '__' + today, async function () {
-      var sameDay = await store.list(COLLECTIONS.drills, ['drillDate', today]);
+      var sameDay = (await store.list(COLLECTIONS.drills, ['drillDate', today]))
+        .concat(await store.list(COLLECTIONS.deletedDrills, ['drillDate', today]));
       var drillId = makeDrillId(typeDef.drillIdPrefix, today, sameDay.map(function (d) { return d.drillId; }));
       while (await store.get(COLLECTIONS.drills, drillId)) {
         drillId = makeDrillId(typeDef.drillIdPrefix, today, sameDay.map(function (d) { return d.drillId; }).concat([drillId]));
@@ -743,6 +744,21 @@ function createDrillService(deps) {
     });
   }
 
+  // Removes the drill, its scenarios and its imported responses from the dashboard.
+  // A Google Form that was already created stays in Drive (the bridge folder).
+  async function deleteDrill(drillId) {
+    return withLock(drillId, async function () {
+      var drill = await getDrill(drillId);
+      var scenarios = await store.list(COLLECTIONS.scenarios, ['drillId', drillId]);
+      var responses = await store.list(COLLECTIONS.responses, ['drillId', drillId]);
+      for (var i = 0; i < responses.length; i++) await store.remove(COLLECTIONS.responses, responses[i].responseKey);
+      for (var j = 0; j < scenarios.length; j++) await store.remove(COLLECTIONS.scenarios, scenarioDocId(drillId, scenarios[j].scenarioId));
+      await store.put(COLLECTIONS.deletedDrills, drillId, { drillId: drillId, drillDate: drill.drillDate, formId: drill.form && drill.form.formId || null, deletedAt: now(), deletedBy: actor });
+      await store.remove(COLLECTIONS.drills, drillId);
+      return { drillId: drillId, scenarios: scenarios.length, responses: responses.length, formId: drill.form && drill.form.formId || null };
+    });
+  }
+
   async function coachingReport(filter) {
     filter = filter || {};
     var drills = await store.list(COLLECTIONS.drills);
@@ -934,7 +950,7 @@ function createDrillService(deps) {
 
   return {
     getSettings: getSettings, saveSettings: saveSettings,
-    createDrill: createDrill, listDrills: listDrills, getDrillBundle: getDrillBundle,
+    createDrill: createDrill, listDrills: listDrills, getDrillBundle: getDrillBundle, deleteDrill: deleteDrill,
     generateNextScenario: generateNextScenario, addManualScenario: addManualScenario,
     regenerateScenario: regenerateScenario, updateScenario: updateScenario, removeScenario: removeScenario,
     resolveFlag: resolveFlag, beginReview: beginReview, approveDrill: approveDrill, reopenForEdits: reopenForEdits,

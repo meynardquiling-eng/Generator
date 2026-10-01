@@ -498,3 +498,26 @@ test('sources refresh automatically: newer export imported, changed doc re-reque
   await svc.refreshSources();
   assert.equal(Object.keys(env.bridge.sourceRequests).length, 1, 'same doc edit is requested once');
 });
+
+test('deleting a drill removes it, its scenarios and its responses only', async () => {
+  const env = await setup();
+  const keep = await env.svc.createDrill({ drillType: 'APPROVE_DENY', scenarioCount: 1 });
+  await env.svc.generateNextScenario(keep.drillId);
+  const drillId = await generatedApprovedDrill(env, 2);
+  await env.svc.createForm(drillId);
+  env.bridge.run();
+  await env.svc.refreshFormStatus(drillId);
+  env.bridge.submit(drillId, { email: 'a@x.com', name: 'A', answers: { 'AD-001/action': ['Free month'] } });
+  await env.svc.syncResponses(drillId);
+  const r = await env.svc.deleteDrill(drillId);
+  assert.equal(r.scenarios, 2);
+  assert.equal(r.responses, 1);
+  assert.equal(r.formId, 'form-1');
+  assert.deepEqual(plain((await env.svc.listDrills()).map(d => d.drillId)), [keep.drillId]);
+  assert.equal((await env.store.list('scenarios', ['drillId', drillId])).length, 0);
+  assert.equal((await env.store.list('responses', ['drillId', drillId])).length, 0);
+  assert.equal((await env.store.list('scenarios', ['drillId', keep.drillId])).length, 1);
+  await assert.rejects(env.svc.getDrillBundle(drillId), /not found/);
+  const next = await env.svc.createDrill({ drillType: 'APPROVE_DENY' });
+  assert.notEqual(next.drillId, drillId, 'a deleted drill ID is never reused');
+});

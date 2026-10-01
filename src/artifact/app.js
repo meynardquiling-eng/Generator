@@ -4,7 +4,7 @@ var S = {
   view: 'today', drillId: null, tab: 'scenarios',
   drills: [], bundle: null, settings: null, report: null, reportType: '',
   catalog: [], sections: null, sourceFilter: '', sourceSummary: null, sourceRun: null,
-  editing: {}, confirmRemove: null, respTrainee: '',
+  editing: {}, confirmRemove: null, confirmDelete: null, respTrainee: '',
   busy: null, error: null, ready: false, fatal: null,
   caps: { db: false, sample: false, mcp: false, user: false }, canWrite: null, actor: 'unknown', names: {}
 };
@@ -280,7 +280,7 @@ function viewDrills() {
   return h('section', { class: 'panel' },
     h('h2', null, 'Drills'),
     h('div', { class: 'table-wrap' }, h('table', null,
-      h('thead', null, h('tr', null, ['Drill ID', 'Type', 'Topic', 'Created', 'Tickets', 'Google Form', 'Submissions', 'Status'].map(function (c) { return h('th', null, c); }))),
+      h('thead', null, h('tr', null, ['Drill ID', 'Type', 'Topic', 'Created', 'Tickets', 'Google Form', 'Submissions', 'Status', ''].map(function (c) { return h('th', null, c); }))),
       h('tbody', null, S.drills.map(function (d) {
         return h('tr', { class: 'click', tabindex: '0', onclick: function () { openDrill(d.drillId); }, onkeydown: function (e) { if (e.key === 'Enter') openDrill(d.drillId); } },
           h('td', { class: 'mono' }, d.drillId),
@@ -290,10 +290,29 @@ function viewDrills() {
           h('td', null, String(d.scenarioCount)),
           h('td', null, d.formStatus === 'NONE' ? h('span', { class: 'muted' }, 'Not created') : pill(d.formStatus === 'CREATED' ? 'Created' : 'Requested', d.formStatus === 'CREATED' ? 'accent' : 'warn')),
           h('td', null, d.submissions ? d.submissions + ' from ' + d.trainees + (d.pendingReview ? ' · ' + d.pendingReview + ' to score' : '') : '—'),
-          h('td', null, statusPill(d.status)));
+          h('td', null, statusPill(d.status)),
+          h('td', { onclick: function (e) { e.stopPropagation(); }, onkeydown: function (e) { e.stopPropagation(); } }, deleteControl(d)));
       }))
     ))
   );
+}
+
+// Two-step delete: the first click asks, the second deletes.
+function deleteControl(d) {
+  if (S.confirmDelete !== d.drillId) {
+    return btn('Delete', function () { S.confirmDelete = d.drillId; render(); }, { danger: true });
+  }
+  return h('div', { class: 'row', style: 'flex-wrap:nowrap' },
+    btn('Confirm delete', function () {
+      S.confirmDelete = null;
+      act('Deleting ' + d.drillId, async function () {
+        var r = await svc.deleteDrill(d.drillId);
+        if (S.drillId === d.drillId) { S.drillId = null; S.bundle = null; S.view = 'drills'; }
+        await loadDrills();
+        return r;
+      }, function (r) { return r ? 'Deleted ' + r.drillId + (r.formId ? '. Its Google Form is still in the bridge folder in Drive.' : '') : ''; });
+    }, { danger: true }),
+    btn('Cancel', function () { S.confirmDelete = null; render(); }, { write: false }));
 }
 
 // ---------------------------------------------------------------- Drill workspace
@@ -376,6 +395,8 @@ function drillActions(b, typeDef, active) {
     acts.push(btn('Complete drill', function () { act('Completing', async function () { await svc.completeDrill(id, false); await reload(); }, 'Drill completed.'); }));
   }
   if (d.status === 'COMPLETED') acts.push(btn('Reopen review', function () { act('Reopening review', async function () { await svc.reopenReview(id); await reload(); }); }));
+  acts.push(h('span', { style: 'flex:1' }));
+  acts.push(deleteControl(d));
   return h('div', { class: 'row' }, acts);
 }
 

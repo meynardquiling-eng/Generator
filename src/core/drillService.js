@@ -838,13 +838,14 @@ function createDrillService(deps) {
         var ch = channels[i];
         var existing = await store.get(COLLECTIONS.sources, 'slack-' + ch.id);
         var age = existing ? Date.parse(now()) - Date.parse(existing.pulledAt) : Infinity;
-        if (!opts.force && age < SLACK_STALE_MS) { result.slack.push({ channel: ch.name, status: 'CURRENT', messages: existing.sections.length }); continue; }
+        var usable = existing && existing.parserVersion === SLACK_PARSER_VERSION && (existing.sections || []).length > 0;
+        if (!opts.force && usable && age < SLACK_STALE_MS) { result.slack.push({ channel: ch.name, status: 'CURRENT', messages: existing.sections.length }); continue; }
         try {
           var msgs = await deps.slack.readChannel(ch.id, { days: SLACK_DAYS });
           var sections = slackSections(msgs, ch);
           var kept = [], size = 0;
           for (var k = 0; k < sections.length && size < SOURCE_CHUNK_CHARS; k++) { kept.push(sections[k]); size += JSON.stringify(sections[k]).length; }
-          await store.put(COLLECTIONS.sources, 'slack-' + ch.id, { chunkId: 'slack-' + ch.id, kind: 'SLACK', channelId: ch.id, channelName: ch.name, pulledAt: now(), sections: kept });
+          await store.put(COLLECTIONS.sources, 'slack-' + ch.id, { chunkId: 'slack-' + ch.id, kind: 'SLACK', channelId: ch.id, channelName: ch.name, pulledAt: now(), parserVersion: SLACK_PARSER_VERSION, sections: kept });
           result.slack.push({ channel: ch.name, status: 'PULLED', messages: kept.length });
         } catch (e) {
           result.slack.push({ channel: ch.name, status: 'ERROR', message: e.message || String(e) });

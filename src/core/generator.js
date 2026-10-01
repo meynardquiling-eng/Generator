@@ -13,6 +13,7 @@ var GENERATOR_SYSTEM_PROMPT = [
   'Account details: 3 to 6 short label/value pairs, each value a few words (for example "Plan: FCF $19/month", "Last cleaning: Sep 22, 2026"). Include only facts an agent would check, plus at most one that does not matter.',
   'DATES. Use current dates. Every date must be within the last 12 months of today (scheduled cleanings may be up to 2 months ahead). Write dates like "Sep 22, 2026".',
   'Do not state the answer, name the policy, or hint at "the correct action" in the ticket or account details.',
+  'Slack messages describe real cases. Use them to learn the rule, never copy them: invent new names, amounts, dates and IDs for every ticket.',
   'Trainer-only fields: rationale in 1 to 2 short sentences; at most 2 common mistakes, each one short line; coaching note in one sentence.'
 ].join('\n');
 

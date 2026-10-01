@@ -131,3 +131,48 @@ test('topic keywords and library topics', () => {
   const sections = [{ sourceType: 'KNOWLEDGE_LIBRARY', path: 'Unused DHJ Voucher > A', text: 'x' }, { sourceType: 'KNOWLEDGE_LIBRARY', path: 'Unused DHJ Voucher > B', text: 'y' }, { sourceType: 'KNOWLEDGE_LIBRARY', path: 'Welcome Page > A', text: 'z' }, { sourceType: 'KNOWLEDGE_LIBRARY', path: 'Welcome Page > B', text: 'z' }];
   assert.deepEqual(plain(core.libraryTopics(sections)), ['Unused DHJ Voucher']);
 });
+
+// Formats as the Slack connector returns them (invented content).
+const DETAILED_CHANNEL = [
+  'Channel: #csq-test (C1)',
+  '',
+  '=== Message from Ana Cruz <ana@example.com> (U111) at 2026-08-17 19:20:53 CDT === ',
+  'Message TS: 1787012453.806019',
+  '<@U999|Claude> <@U222|Ben Lim> Legacy DHJ| C 7004279',
+  '',
+  'C bought a voucher, then disputed it. Should I reinstate it or charge full price?',
+  'Thread: 2 replies (latest: 2026-08-19 11:25:35 CDT)',
+  '',
+  '=== Message from Bo Diaz <bo@example.com> (U333) at 2026-08-17 13:01:29 CDT === ',
+  'Message TS: 1786989689.406889',
+  'ok',
+].join('\n');
+
+const THREAD = [
+  '=== THREAD PARENT MESSAGE ===', 'From: Ana Cruz <ana@example.com> (U111)', 'Time: 2026-08-17 19:20:53 CDT', 'Message TS: 1787012453.806019', 'question text',
+  '', '=== THREAD REPLIES (2 total) ===', '', '--- Reply 1 of 2 ---', 'From: Ben Lim <ben@example.com> (U222)', 'Time: 2026-08-17 20:00:00 CDT', 'Message TS: 1787014000.1',
+  '<@U111|Ana Cruz>', '• Offer the retention attempt first.', '', '--- Reply 2 of 2 ---', 'From: Ana Cruz <ana@example.com> (U111)', 'Time: 2026-08-17 20:05:00 CDT', 'Message TS: 1787014300.1', 'Thanks!'
+].join('\n');
+
+test('slack detailed channel format parses messages, ts and reply counts', () => {
+  const msgs = core.parseSlackChannelText(core.slackPayloadText({ messages: DETAILED_CHANNEL }), 'C1');
+  assert.equal(msgs.length, 2);
+  assert.equal(msgs[0].author, 'Ana Cruz');
+  assert.equal(msgs[0].ts, '1787012453.806019');
+  assert.equal(msgs[0].replyCount, 2);
+  assert.match(msgs[0].text, /disputed it/);
+});
+
+test('slack threads join the question with the replies, without emails or record numbers', () => {
+  const msgs = core.parseSlackChannelText(DETAILED_CHANNEL, 'C1');
+  msgs[0].replies = core.parseSlackThreadText(THREAD);
+  assert.equal(msgs[0].replies.length, 2);
+  assert.equal(msgs[0].replies[0].author, 'Ben Lim');
+  const sections = core.slackSections(msgs, { id: 'C1', name: 'csq-test' });
+  assert.equal(sections.length, 1, '"ok" is too short to keep');
+  const t = sections[0].text;
+  assert.match(t, /Replies:\n- Ben Lim: @Ana Cruz\n• Offer the retention attempt first\./);
+  assert.ok(!/7004279|@example\.com|U222/.test(t), t);
+  assert.match(t, /C \[id\]/);
+  assert.match(sections[0].heading, /2 replies/);
+});

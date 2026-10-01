@@ -154,6 +154,14 @@ function makeSlackReader(mcp) {
         if (!m) break;
         cursor = m[1];
       }
+      // The answers in escalation channels live in the replies; read the newest threads.
+      var withThreads = messages.filter(function (x) { return x.replyCount > 0 && /^\d+\.\d+$/.test(x.ts); }).slice(0, 30);
+      for (var i = 0; i < withThreads.length; i++) {
+        try {
+          var tr = await mcp.callTool(SLACK, 'slack_read_thread', { channel_id: channelId, message_ts: withThreads[i].ts, response_format: 'detailed' }, { cache: false });
+          withThreads[i].replies = parseSlackThreadText(slackPayloadText(tr.payload));
+        } catch (e) { /* keep the question without replies */ }
+      }
       return messages;
     },
     async searchChannels(term) {

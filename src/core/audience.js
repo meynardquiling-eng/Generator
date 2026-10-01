@@ -6,11 +6,13 @@ var AUDIENCES = [
   {
     id: 'CUSTOMER', label: 'C-side (customer-facing)', short: 'C-side',
     sender: 'a customer (C) writing to Homeaglow Care',
+    fields: ['Plan / membership type', 'Member since', 'Completed cleanings', 'Last cleaning date', 'Next cleaning date', 'Voucher status', 'Payment / charge status', 'Refund or dispute status', 'Prior offers given', 'Prior agent notes', 'Job status'],
     keywords: ['customer', 'membership', 'voucher', 'refund', 'retention', 'etf', 'fcf', 'dhj']
   },
   {
     id: 'CP', label: 'CP side (CP Gen)', short: 'CP side',
     sender: 'a cleaner partner (CP) writing to Homeaglow’s CP support team. Use CP-facing policy: payouts, job claims and cancellations, invoices, pending invoices, lockouts on site, ratings, tiering, profile status and deactivation',
+    fields: ['CP profile status', 'CP tier', 'Job status', 'Job date', 'Payout status', 'Payout date', 'Invoice status', 'Pending invoices', 'Recent cancellations', 'Rating', 'Prior agent notes'],
     keywords: ['cp', 'cleaner', 'cleaner partner', 'payout', 'pay', 'claim', 'claimed', 'invoice', 'pending invoice', 'deactivation', 'tier', 'tiering', 'cp profile', 'cp-facing']
   }
 ];

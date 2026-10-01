@@ -10,7 +10,9 @@ var GENERATOR_SYSTEM_PROMPT = [
   'If the Knowledge Library and a Slack message disagree, follow the more recent clarification and describe the disagreement in sourceConflict; otherwise leave sourceConflict empty.',
   'If the sources do not clearly give the correct answer, write a different ticket that they do cover. If none is possible, set insufficientSource to true and say what is missing in insufficientReason. Never invent a policy.',
   'STYLE. Write like the real sender (a customer or a cleaner partner, as the prompt says): short, plain, everyday words (easy for a new hire to read). Title: 3 to 6 words. Ticket: 2 to 4 short sentences, under 80 words. No long backstory.',
-  'Account details: 3 to 6 short label/value pairs, each value a few words (for example "Plan: FCF $19/month", "Last cleaning: Sep 22, 2026"). Include only facts an agent would check, plus at most one that does not matter.',
+  'Account details: 3 to 6 short label/value pairs, each value a few words (for example "Plan: FCF $19/month", "Last cleaning: Sep 22, 2026").',
+  'ACCOUNT DETAILS MUST BE REAL FIELDS that agents actually see in Homeaglow\'s CRM or CP tools (the prompt lists the usual ones). Never invent fields such as app version, device, browser, operating system or internal codes. You may include at most one real field that does not change the answer.',
+  'Do not copy a process, tag or checklist name into the ticket or account details. Show the facts that point to it (status, dates, what happened) the way the tools show them.',
   'DATES. Use current dates. Every date must be within the last 12 months of today (scheduled cleanings may be up to 2 months ahead). Write dates like "Sep 22, 2026".',
   'Do not state the answer, name the policy, or hint at "the correct action" in the ticket or account details.',
   'Slack messages describe real cases. Use them to learn the rule, never copy them: invent new names, amounts, dates and IDs for every ticket.',
@@ -21,6 +23,7 @@ function buildGenerationPrompt(typeDef, ctx) {
   var parts = [];
   parts.push('Today is ' + humanDate(ctx.today) + '.');
   parts.push('AGENT SIDE: ' + getAudience(ctx.audience).short + '. The ticket is from ' + getAudience(ctx.audience).sender + '.');
+  parts.push('Account detail fields agents see on this side: ' + getAudience(ctx.audience).fields.join(', ') + '.');
   if (ctx.topic) parts.push('TOPIC: every ticket in this drill must be about "' + ctx.topic + '". Use the sources about this topic.');
   parts.push(typeDef.promptGuidance(ctx));
   parts.push('Difficulty: ' + ctx.difficulty + ' — ' + (DIFFICULTY_GUIDANCE[ctx.difficulty] || ''));
@@ -30,6 +33,13 @@ function buildGenerationPrompt(typeDef, ctx) {
   if (ctx.trainerHint) parts.push('Trainer request for this scenario: ' + ctx.trainerHint);
   parts.push('Sources:\n\n' + formatSectionsForPrompt(ctx.sections));
   return { system: GENERATOR_SYSTEM_PROMPT, user: parts.join('\n\n') };
+}
+
+// Rules a draft must meet; any problem triggers one automatic rewrite.
+function styleProblems(typeDef, ctx, out) {
+  var problems = ctx.today ? checkReadability(out, ctx.today) : [];
+  if (typeDef.styleCheck) problems = problems.concat(typeDef.styleCheck(out, ctx));
+  return problems;
 }
 
 async function generateScenarioContent(typeDef, ctx, llm) {
@@ -44,7 +54,7 @@ async function generateScenarioContent(typeDef, ctx, llm) {
     throw ServiceError('BAD_MODEL_OUTPUT', 'Generated scenario did not match the expected structure: ' + problems.slice(0, 5).join('; '));
   }
   // One automatic rewrite when the ticket is too wordy or its dates are stale.
-  var style = ctx.today ? checkReadability(output, ctx.today) : [];
+  var style = styleProblems(typeDef, ctx, output);
   if (style.length) {
     var retry = await llm.generateJson({
       system: prompt.system,
@@ -70,7 +80,7 @@ function buildScenarioParts(typeDef, ctx, output) {
   if (!isBlank(out.sourceConflict)) {
     flags.push(makeFlag('SOURCE_CONFLICT', 'The Library and a Slack clarification disagree: ' + out.sourceConflict, false));
   }
-  var styleLeft = output && ctx.today ? checkReadability(out, ctx.today) : [];
+  var styleLeft = output ? styleProblems(typeDef, ctx, out) : [];
   if (styleLeft.length) flags.push(makeFlag('STYLE', styleLeft.join(' '), false));
   if (out.insufficientSource) {
     flags.push(makeFlag('INSUFFICIENT_SOURCE', 'Generator reported the sources do not support an answer: ' + (out.insufficientReason || '(no reason given)'), true));

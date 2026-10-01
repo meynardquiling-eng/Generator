@@ -3,6 +3,9 @@
 
 var READ_LIMITS = { ticketWords: 90, titleWords: 7, detailCount: 6, detailWords: 10, rationaleWords: 45 };
 
+// Fields that do not exist in Homeaglow's agent tools.
+var INVENTED_FIELD_RE = /\b(app\s*version|device|browser|operating\s*system|os\s*version|ip\s*address|user\s*agent|build\s*number|sdk)\b/i;
+
 var MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, sept: 8, oct: 9, nov: 10, dec: 11 };
 
 function wordCount(s) {
@@ -35,6 +38,9 @@ function checkReadability(out, today) {
   if ((out.accountDetails || []).length > READ_LIMITS.detailCount) problems.push('Use at most ' + READ_LIMITS.detailCount + ' account details.');
   (out.accountDetails || []).forEach(function (d) {
     if (wordCount(d.value) > READ_LIMITS.detailWords) problems.push('Account detail "' + d.label + '" is too long; keep each value under ' + READ_LIMITS.detailWords + ' words.');
+  });
+  (out.accountDetails || []).forEach(function (d) {
+    if (INVENTED_FIELD_RE.test(d.label || '')) problems.push('Account detail "' + d.label + '" is not a field agents see; remove it.');
   });
   if (wordCount(out.rationale) > READ_LIMITS.rationaleWords) problems.push('Rationale is too long; 2 short sentences.');
   var now = new Date(today + 'T00:00:00Z').getTime();

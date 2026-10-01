@@ -558,3 +558,32 @@ test('agent side: CP drills use CP senders, CP sources and a separate CP process
   assert.match(env.llm.prompts[env.llm.prompts.length - 1], /AGENT SIDE: C-side\. The ticket is from a customer/);
   assert.deepEqual(plain((await env.svc.listDrills()).map(d => d.audience).sort()), ['CP', 'CUSTOMER']);
 });
+
+test('invented fields and copied answer choices are rewritten; category follows the ticket', async () => {
+  const env = await setup();
+  const d = await env.svc.createDrill({ drillType: 'TRIAGE', audience: 'CP', scenarioCount: 1 });
+  env.llm.queue(out => Object.assign(out, {
+    category: 'Payout issue',
+    accountDetails: [{ label: 'CP app version', value: 'CP App 4.2' }, { label: 'Note', value: 'Use CP Lockout Pay' }]
+  }));
+  const s = await env.svc.generateNextScenario(d.drillId);
+  const calls = env.llm.prompts.length;
+  const retry = env.llm.prompts[calls - 1];
+  assert.match(retry, /"CP app version" is not a field agents see/);
+  assert.match(retry, /answer choice "CP Lockout Pay" word for word/);
+  assert.match(env.llm.prompts[calls - 2], /Account detail fields agents see on this side: CP profile status/);
+  assert.ok(!JSON.stringify(s.trainee).includes('App 4.2'), 'rewritten draft kept');
+  // A trainer edit that copies a choice into the ticket is blocked until fixed.
+  const edited = await env.svc.updateScenario(d.drillId, 'TR-001', { trainee: { scenario: 'Please run Missing Payout for me.' } });
+  assert.ok(edited.reviewFlags.find(f => f.code === 'INVALID_SCENARIO' && /Missing Payout/.test(f.message)));
+});
+
+test('the generator may change the suggested category to fit its ticket', async () => {
+  const env = await setup();
+  const d = await env.svc.createDrill({ drillType: 'TRIAGE', audience: 'CP', scenarioCount: 1 });
+  env.llm.queue(out => Object.assign(out, { category: 'Payout issue' }));
+  const s = await env.svc.generateNextScenario(d.drillId);
+  assert.equal(s.category, 'Payout issue');
+  const p = env.llm.prompts.find(x => /Aim for this category/.test(x));
+  assert.match(p, /Aim for this category: CP lockout\. Then set "category" to whichever category/);
+});

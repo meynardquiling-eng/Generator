@@ -78,7 +78,7 @@ var TRIAGE_TYPE = {
     return [
       'Drill: "Triage-Only". The trainee does not reply to the customer; they only pick the process, tag and checklist.',
       'Approved process catalog (the ONLY valid answers):\n' + list,
-      'correctProcessId must be one of the catalog ids above. Ticket category should be: ' + (ctx.category || 'any of ' + triageCategories(ctx.audience).join(', ')) + '.',
+      'correctProcessId must be one of the catalog ids above. Aim for this category: ' + (ctx.category || 'any of ' + triageCategories(ctx.audience).join(', ')) + '. Then set "category" to whichever category (' + triageCategories(ctx.audience).join(', ') + ') really fits the ticket you wrote.',
       'Write the ticket so that surface keywords point toward a plausible but wrong process at least some of the time; the account facts must decide it.',
       'requiredAccountDetail is the single fact that determines the process.'
     ].join('\n\n');
@@ -120,6 +120,19 @@ var TRIAGE_TYPE = {
       flags: flags,
       questions: qs
     };
+  },
+
+  // A multi-word process, a tag or a checklist name copied into the ticket gives the answer away.
+  styleCheck: function (out, ctx) {
+    var choices = [];
+    (ctx.catalog || []).forEach(function (c) { choices.push(c.name, c.tag, c.checklist); });
+    return giveawayProblems(out.ticket, out.accountDetails, choices);
+  },
+
+  validate: function (scenario) {
+    var choices = [];
+    (scenario.trainee.questions || []).forEach(function (q) { choices = choices.concat(q.choices || []); });
+    return giveawayProblems(scenario.trainee.scenario, scenario.trainee.accountDetails, choices);
   },
 
   catalogPromptGuidance: function (audienceId) {
@@ -185,4 +198,13 @@ function shortProcessName(name) {
   if (words.length > 6) s = words.slice(0, 6).join(' ');
   if (!s) return String(name || '').trim();
   return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function giveawayProblems(ticket, accountDetails, choices) {
+  var text = normalizeText([ticket].concat((accountDetails || []).map(function (d) { return d.label + ': ' + d.value; })).join(' \n '));
+  return uniq((choices || []).filter(function (c) {
+    if (isBlank(c)) return false;
+    var n = normalizeText(c);
+    return (n.indexOf(' ') !== -1 || n.indexOf('_') !== -1) && text.indexOf(n) !== -1;
+  })).map(function (c) { return 'The ticket or account details contain the answer choice "' + c + '" word for word.'; });
 }

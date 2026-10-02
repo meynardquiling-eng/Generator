@@ -1,12 +1,13 @@
 // Drill 1 — "Approve or Deny" speed drill (daily, 5 complex membership tickets, 15 minutes).
 
-// Every offer or action a C-side agent can take on a membership ticket, as the Knowledge
-// Library groups them: retention (keep the membership), exit (close it out fairly) and
-// make-right (fix a charge we caused).
+// Every offer or action a C-side agent can take on a membership ticket, grouped as the
+// Knowledge Library groups them: retention, exit, refunds (which instrument, and who bears
+// the cost) and escalation.
 var APPROVE_DENY_ACTION_GROUPS = [
   { group: 'Retention', actions: ['Voucher or credit', 'MF reduction', 'MCT reduction', 'Free month', 'Pause membership', 'Set Max CP Rate'] },
-  { group: 'Exit', actions: ['ETF reduction', 'ETF waiver', 'MF refund', 'Cancel membership'] },
-  { group: 'Make-right', actions: ['Refund a fee (LMC, lockout or priority)'] }
+  { group: 'Exit', actions: ['ETF reduction', 'ETF waiver', 'Cancel membership', 'Cancel upcoming jobs and RC plan', 'Set a Timed Reminder'] },
+  { group: 'Refunds', actions: ['Admin refund for the job', 'CP Dashboard refund', 'CP Holdback', 'MF refund', 'DHJ voucher refund', 'Invalidate voucher', 'Fee refund (LMC or priority fee)'] },
+  { group: 'Escalation', actions: ['Escalate to CSQ for approval'] }
 ];
 var APPROVE_DENY_ACTIONS = APPROVE_DENY_ACTION_GROUPS.reduce(function (all, g) { return all.concat(g.actions); }, []).concat(['None of the above']);
 
@@ -56,6 +57,7 @@ var APPROVE_DENY_TYPE = {
     return [
       'Drill: "Approve or Deny". The trainee must decide which offers or actions the member qualifies for. The full list, by type: ' +
         APPROVE_DENY_ACTION_GROUPS.map(function (g) { return g.group + ': ' + g.actions.join(', '); }).join('; ') + '.',
+      'Refund instruments differ: a CP Dashboard refund charges the cost back to the CP (CP error, e.g. an invalid lockout); an admin refund comes out of Homeaglow (goodwill or our error), and may pair with a CP Holdback. Escalate to CSQ for approval when the right offer is beyond agent authority.',
       'Pick the answer the sources support for this exact situation. More than one action may apply only if the sources say they can be combined ' +
         '(e.g. Cancel membership together with ETF waiver). Vary the correct answer across tickets; do not default to Free month.',
       'correctActions must be chosen strictly from that list. Use "None of the above" alone, never combined with another action; it means the agent should only explain, with no offer or account action.',

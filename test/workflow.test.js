@@ -604,7 +604,9 @@ test('approve or deny offers every documented offer and action', async () => {
   const s = await env.svc.generateNextScenario(d.drillId);
   const choices = s.trainee.questions.find(q => q.key === 'action').choices;
   ['Voucher or credit', 'MF reduction', 'MCT reduction', 'Free month', 'Pause membership', 'Set Max CP Rate',
-    'ETF reduction', 'ETF waiver', 'MF refund', 'Cancel membership', 'Refund a fee (LMC, lockout or priority)', 'None of the above']
+    'ETF reduction', 'ETF waiver', 'Cancel membership', 'Cancel upcoming jobs and RC plan', 'Set a Timed Reminder',
+    'Admin refund for the job', 'CP Dashboard refund', 'CP Holdback', 'MF refund', 'DHJ voucher refund', 'Invalidate voucher',
+    'Fee refund (LMC or priority fee)', 'Escalate to CSQ for approval', 'None of the above']
     .forEach(c => assert.ok(choices.includes(c), c));
-  assert.match(env.llm.prompts.find(p => /Approve or Deny/.test(p)), /Exit: ETF reduction, ETF waiver, MF refund, Cancel membership/);
+  assert.match(env.llm.prompts.find(p => /Approve or Deny/.test(p)), /Refunds: Admin refund for the job, CP Dashboard refund/);
 });

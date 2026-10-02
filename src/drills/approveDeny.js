@@ -1,11 +1,19 @@
 // Drill 1 — "Approve or Deny" speed drill (daily, 5 complex membership tickets, 15 minutes).
 
-var APPROVE_DENY_ACTIONS = ['Free month', 'MF reduction', 'ETF waiver', 'None of the above'];
+// Every offer or action a C-side agent can take on a membership ticket, as the Knowledge
+// Library groups them: retention (keep the membership), exit (close it out fairly) and
+// make-right (fix a charge we caused).
+var APPROVE_DENY_ACTION_GROUPS = [
+  { group: 'Retention', actions: ['Voucher or credit', 'MF reduction', 'MCT reduction', 'Free month', 'Pause membership', 'Set Max CP Rate'] },
+  { group: 'Exit', actions: ['ETF reduction', 'ETF waiver', 'MF refund', 'Cancel membership'] },
+  { group: 'Make-right', actions: ['Refund a fee (LMC, lockout or priority)'] }
+];
+var APPROVE_DENY_ACTIONS = APPROVE_DENY_ACTION_GROUPS.reduce(function (all, g) { return all.concat(g.actions); }, []).concat(['None of the above']);
 
 var APPROVE_DENY_TYPE = {
   type: 'APPROVE_DENY',
   name: 'Approve or Deny',
-  description: 'Decide which membership-retention action the member qualifies for and name the account detail that proves it.',
+  description: 'Decide which offer or action the member qualifies for and name the account detail that proves it.',
   drillIdPrefix: 'APPROVE-DENY',
   scenarioIdPrefix: 'AD',
   cadence: 'DAILY',
@@ -14,19 +22,20 @@ var APPROVE_DENY_TYPE = {
   audiences: ['CUSTOMER'],
   sourceKeywords: [
     'free month', 'mf reduction', 'membership fee', 'etf', 'early termination', 'waiver', 'waive',
-    'retention', 'retain', 'cancel', 'cancellation', 'membership', 'forever clean', 'downgrade', 'pause'
+    'retention', 'retain', 'cancel', 'cancellation', 'membership', 'forever clean', 'downgrade', 'pause',
+    'mct', 'minimum commitment', 'voucher', 'credit', 'max cp rate', 'refund', 'offer', 'exit offer', 'make-right'
   ],
 
   formInstructions: function (drill) {
     return 'Approve or Deny \u2014 ' + drill.config.scenarioCount + ' tickets, about ' + drill.config.targetMinutes + ' minutes.\n' +
-      'For each ticket: pick the action, name the account detail that proves it, and say why in a sentence.';
+      'For each ticket: pick the offer or action, name the account detail that proves it, and say why in a sentence.';
   },
 
   questions: function () {
     return [
       {
         key: 'action', type: 'CHECKBOX', required: true,
-        prompt: 'What should you offer? (pick all that apply)',
+        prompt: 'What should you offer or do? (pick all that apply)',
         choices: APPROVE_DENY_ACTIONS.slice(),
         scoring: { mode: 'AUTO', points: 2, method: 'EXACT_SET', gapTagOnWrong: 'INCORRECT_DECISION', criteria: 'Full credit only when the picks match the answer key exactly.' }
       },
@@ -45,9 +54,11 @@ var APPROVE_DENY_TYPE = {
 
   promptGuidance: function () {
     return [
-      'Drill: "Approve or Deny". The trainee must decide which of these retention actions the member qualifies for: ' +
-        APPROVE_DENY_ACTIONS.join(', ') + '. More than one action may apply only if the sources say they can be combined.',
-      'correctActions must be chosen strictly from that list. Use "None of the above" alone, never combined with another action.',
+      'Drill: "Approve or Deny". The trainee must decide which offers or actions the member qualifies for. The full list, by type: ' +
+        APPROVE_DENY_ACTION_GROUPS.map(function (g) { return g.group + ': ' + g.actions.join(', '); }).join('; ') + '.',
+      'Pick the answer the sources support for this exact situation. More than one action may apply only if the sources say they can be combined ' +
+        '(e.g. Cancel membership together with ETF waiver). Vary the correct answer across tickets; do not default to Free month.',
+      'correctActions must be chosen strictly from that list. Use "None of the above" alone, never combined with another action; it means the agent should only explain, with no offer or account action.',
       'requiredAccountDetail must be one concrete fact that appears verbatim (or nearly verbatim) in accountDetails or the ticket, e.g. a date, count, plan, or prior action.',
       'Include at least two relevant-looking but irrelevant facts and at least one conflicting signal so the trainee has to identify what matters.'
     ].join('\n');

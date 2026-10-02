@@ -597,3 +597,14 @@ test('reference material such as code lists and penalty ladders never becomes a 
   const proc = s.trainee.questions.find(q => q.key === 'process');
   assert.deepEqual(plain(proc.choices.slice().sort()), ['CP Lockout Pay', 'Missing Payout']);
 });
+
+test('approve or deny offers every documented offer and action', async () => {
+  const env = await setup();
+  const d = await env.svc.createDrill({ drillType: 'APPROVE_DENY', scenarioCount: 1 });
+  const s = await env.svc.generateNextScenario(d.drillId);
+  const choices = s.trainee.questions.find(q => q.key === 'action').choices;
+  ['Voucher or credit', 'MF reduction', 'MCT reduction', 'Free month', 'Pause membership', 'Set Max CP Rate',
+    'ETF reduction', 'ETF waiver', 'MF refund', 'Cancel membership', 'Refund a fee (LMC, lockout or priority)', 'None of the above']
+    .forEach(c => assert.ok(choices.includes(c), c));
+  assert.match(env.llm.prompts.find(p => /Approve or Deny/.test(p)), /Exit: ETF reduction, ETF waiver, MF refund, Cancel membership/);
+});
